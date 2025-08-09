@@ -1,0 +1,4419 @@
+//+------------------------------------------------------------------+
+//|                           TelegramEA_islamahmed9717_MT5.mq5      |
+//|                         Copyright 2025-06-20, islamahmed9717    |
+//|              Complete MT5 Version with Limit Order Support      |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025-06-20, islamahmed9717"
+#property link      "https://github.com/islamahmed9717"
+#property version   "3.00"
+#property description "Complete Telegram EA for MT5 - With Limit/Stop Order Support"
+#property description "Current UTC Time: 2025-06-20 23:03:50"
+#property description "Developer: islamahmed9717"
+
+//--- Include required libraries for MT5
+#include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+
+//--- Enumerations (must be defined before input parameters)
+enum ENUM_RISK_MODE
+{
+   RISK_FIXED_LOT,        // Fixed Lot Size
+   RISK_MONEY_AMOUNT,     // Money Amount
+   RISK_PERCENT_BALANCE   // Percent of Balance
+};
+//--- BROKER ENUMS
+enum ENUM_BROKER_TYPE
+{
+   BROKER_AUTO_DETECT,    // 🤖 Auto-Detect My Broker
+   BROKER_EXNESS,         // 🔴 Exness
+   BROKER_EQUITI,         // 🟢 Equiti  
+   BROKER_ONE_ROYAL,      // 🔵 One Royal
+   BROKER_IC_MARKETS,     // 🟠 IC Markets
+   BROKER_MANUAL          // ⚙️ Manual Configuration
+};
+
+enum ENUM_EXNESS_ACCOUNT
+{
+   EXNESS_AUTO_DETECT,    // 🤖 Auto-Detect Account Type
+   EXNESS_STANDARD,       // Standard Account (no suffix)
+   EXNESS_PRO,            // Pro Account (.a suffix)
+   EXNESS_ZERO,           // Zero Account (.z suffix)
+   EXNESS_RAW             // Raw Account (.r suffix)
+};
+
+//--- Input Parameters
+input group "==== TELEGRAM CHANNEL SETTINGS ===="
+input string ChannelIDs = ""; // Channel IDs from Windows App (comma-separated)
+input string SignalFilePath = "telegram_signals.txt"; // Signal file name
+input int SignalCheckInterval = 5; // Check for new signals every X seconds
+input int MaxSignalAgeMinutes = 10; // Maximum signal age in minutes
+
+input group "==== SYMBOL MAPPING & BROKER SETTINGS ===="
+input string SymbolsMapping = ""; // Symbol mappings (FROM:TO,FROM:TO)
+input string SymbolPrefix = ""; // Symbol prefix (e.g., "oct.")
+input string SymbolSuffix = ""; // Symbol suffix (e.g., ".m")
+input string SkipSuffixPrefixPairs = ""; // Pairs to skip prefix/suffix
+input string ExcludedSymbols = ""; // Symbols to never trade
+input string SymbolsToTrade = ""; // Only trade these symbols (whitelist)
+
+string processedSignalIdsFile = "processed_signal_ids.dat";
+int maxProcessedSignals = 10000; // Limit to prevent memory issues
+
+input group "==== BROKER AUTO-CONFIGURATION ===="
+input ENUM_BROKER_TYPE BrokerSelection = BROKER_AUTO_DETECT; // Select Your Broker
+input ENUM_EXNESS_ACCOUNT ExnessAccountType = EXNESS_AUTO_DETECT; // Exness Account Type (if using Exness)
+input bool UseManualMapping = false; // Override with Manual Mapping
+
+input group "==== RISK MANAGEMENT ===="
+input ENUM_RISK_MODE RiskMode = RISK_FIXED_LOT; // Risk calculation mode
+input double FixedLotSize = 0.01; // Fixed lot size
+input double RiskAmount = 100; // Risk amount in account currency
+input double RiskPercent = 2.0; // Risk percentage of balance
+input bool SplitRiskEqually = false; // Split risk equally between TPs
+
+input group "==== TRADE MANAGEMENT ===="
+input bool ForceMarketExecution = false; // Force market execution (ignore signal order type)
+input int MaxSpreadPips = 100; // Maximum allowed spread (pips)
+input bool IgnoreTradesWithoutSL = false; // Ignore signals without SL
+input bool IgnoreTradesWithoutTP = false; // Ignore signals without TP
+input int MaxRetriesOrderSend = 3; // Maximum retries for order execution
+
+input group "==== PRICE TOLERANCE SETTINGS ===="
+input int PriceTolerancePips = 15; // Price tolerance in pips (slippage)
+input bool UseMarketPriceIfExceeded = true; // Use market price if tolerance exceeded
+input bool SkipSignalIfExceeded = false; // Skip signal if tolerance exceeded
+
+input group "==== PENDING ORDER SETTINGS ===="
+input int PendingOrderExpirationHours = 24; // Pending order expiration (hours, 0=no expiration)
+input int MinDistanceForPendingPips = 5; // Minimum distance for pending orders (pips)
+input bool DeletePendingOnOpposite = true; // Delete pending orders on opposite signal
+
+input group "==== ADVANCED FEATURES ===="
+input bool UseTrailingStop = false; // Enable trailing stop
+input int TrailingStartPips = 50; // Start trailing after X pips profit
+input int TrailingStepPips = 20; // Trailing step in pips
+input bool MoveSLToBreakeven = true; // Move SL to breakeven
+input int BreakevenAfterPips = 50; // Move to breakeven after X pips
+input int BreakevenPlusPips = 2; // Breakeven + X pips
+
+input group "==== NOTIFICATIONS ===="
+input bool SendMT5Alerts = true; // Send MT5 alerts
+input bool SendPushNotifications = true; // Send push notifications
+input bool PrintToExpertLog = true; // Print detailed logs
+input string CommentPrefix = "TelegramEA"; // Trade comment prefix
+
+input group "==== TIME FILTER ===="
+input bool UseTimeFilter = false; // Enable time-based filtering
+input string StartTime = "00:00"; // Trading start time (HH:MM)
+input string EndTime = "23:59"; // Trading end time (HH:MM)
+input bool TradeOnMonday = true;
+input bool TradeOnTuesday = true;
+input bool TradeOnWednesday = true;
+input bool TradeOnThursday = true;
+input bool TradeOnFriday = true;
+input bool TradeOnSaturday = false;
+input bool TradeOnSunday = false;
+
+bool g_ContinuousMonitoring = true;
+//--- MT5 Trading Objects
+CTrade trade;
+CSymbolInfo symbolInfo;
+CPositionInfo positionInfo;
+COrderInfo orderInfo;
+
+static int g_lastFileSize = 0;
+static datetime g_lastFileCheck = 0;
+static int g_lastProcessedLine = 0;
+static int g_totalLinesProcessed = 0;    // Track total lines processed
+
+//--- Global Variables
+string processedSignalIds[]; // Array to store processed signal IDs
+int processedSignalCount = 0;
+datetime lastSignalTime = 0;
+int totalSignalsProcessed = 0;
+int totalTradesExecuted = 0;
+int totalSymbolsFiltered = 0;
+int totalExpiredSignals = 0;
+ulong magicNumber = 999001; // MT5 uses ulong for magic numbers
+
+// Add these AFTER existing globals:
+static int g_lastLineCount = 0;
+
+// Symbol mapping arrays
+string symbolMappings[][2];
+int symbolMappingCount = 0;
+string excludedSymbolsList[];
+int excludedSymbolsCount = 0;
+string allowedSymbolsList[];
+int allowedSymbolsCount = 0;
+string skipPrefixSuffixList[];
+int skipPrefixSuffixCount = 0;
+
+//--- Trade tracking structure for MT5
+struct TradeInfo
+{
+   ulong ticket;
+   string symbol;
+   ENUM_ORDER_TYPE orderType;
+   double lotSize;
+   double openPrice;
+   double stopLoss;
+   double takeProfit;
+   datetime openTime;
+   bool slMovedToBreakeven;
+   double lastTrailingLevel;
+   string originalSymbol;
+};
+TradeInfo openTrades[];
+int openTradesCount = 0;
+
+//--- Pending order tracking
+struct PendingOrderInfo
+{
+   ulong ticket;
+   string symbol;
+   ENUM_ORDER_TYPE orderType;
+   double lotSize;
+   double price;
+   double stopLoss;
+   double takeProfit;
+   datetime createTime;
+   datetime expireTime;
+   string originalSymbol;
+   long channelId;
+};
+PendingOrderInfo pendingOrders[];
+int pendingOrdersCount = 0;
+
+//--- Enhanced Signal structure with ORDER TYPE
+struct TelegramSignal
+{
+   string signalId;
+   string originalSymbol;
+   string finalSymbol;
+   string direction;
+   string orderType;      // NEW: MARKET, LIMIT, STOP
+   double entryPrice;
+   double stopLoss;
+   double takeProfit1;
+   double takeProfit2;
+   double takeProfit3;
+   datetime signalTime;
+   datetime receivedTime;
+   string channelId;
+   string channelName;
+   string originalText;
+   bool isExpired;
+   bool isProcessed;
+};
+
+struct LicenseInfo
+{
+    long account;
+    int expiry_year;
+    int expiry_month;
+    int expiry_day;
+    string customer_name;
+};
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // LICENSE CHECK - MUST BE FIRST!
+    Print("═══════════════════════════════════════════");
+    Print("🔐 CHECKING EA LICENSE...");
+    Print("═══════════════════════════════════════════");
+    
+    if(!IsLicensed())
+    {
+        string account = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+        string broker = AccountInfoString(ACCOUNT_COMPANY);
+        
+        Alert("❌ EA NOT LICENSED for account: " + account);
+        Print("❌ LICENSE CHECK FAILED for account: ", account);
+        Print("❌ Broker: ", broker);
+        
+        Comment("❌ UNLICENSED EA\n" +
+                "🔢 Your Account: " + account + "\n" +
+                "🏦 Your Broker: " + broker + "\n" +
+                "📧 Contact: islamahmed9717@gmail.com\n" +
+                "💰 License Price: $200 (6 months)\n" +
+                "💎 Lifetime Price: $500\n" +
+                "⏰ Instant activation!\n" +
+                "🚀 Professional EA with support\n" +
+                "💬 WhatsApp: +1234567890\n" +
+                "🎯 Get licensed now!");
+        
+        return(INIT_FAILED); // Stop EA completely
+    }
+    
+    // LICENSE VALID - Show success
+    string account = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+    string broker = AccountInfoString(ACCOUNT_COMPANY);
+    string server = AccountInfoString(ACCOUNT_SERVER);
+    
+    Print("✅ EA LICENSE VALID for account: ", account);
+    Print("✅ Broker: ", broker);
+    Print("✅ Server: ", server);
+    
+    Comment("✅ EA LICENSED & ACTIVE\n" +
+            "👤 Account: " + account + "\n" +
+            "🏦 Broker: " + broker + "\n" +
+            "🖥️ Server: " + server + "\n" +
+            "📅 Time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + "\n" +
+            "🚀 Status: Running\n" +
+            "👨‍💻 Developer: islamahmed9717\n" +
+            "📊 Version: Commercial v3.0 - LIMIT ORDERS");
+    
+    Print("✅ License check passed - EA starting...");
+    Print("═══════════════════════════════════════════");
+    
+    // ===== ADD YOUR ORIGINAL EA INITIALIZATION CODE BELOW =====
+    
+    // Initialize broker-specific symbol mapping
+    Print("🏦 INITIALIZING BROKER MAPPING");
+    InitializeSymbolMappings();
+    
+    Print("🚀 TELEGRAM EA MANAGER - LICENSED VERSION WITH LIMIT ORDERS");
+    Print("👤 Developer: islamahmed9717");
+    Print("📅 Version: 3.00 MT5 - COMMERCIAL LICENSED WITH LIMIT/STOP ORDERS");
+    Print("⏰ Signal Expiry: ", MaxSignalAgeMinutes, " minutes");
+    Print("🔄 Check Interval: ", SignalCheckInterval, " seconds");
+    Print("📊 Market Order Override: ", ForceMarketExecution ? "YES" : "NO");
+    
+    // Validate and fix check interval
+    int fixedInterval = MathMax(1, MathMin(10, SignalCheckInterval));
+    if(fixedInterval != SignalCheckInterval)
+    {
+        Print("⚠️ Adjusted SignalCheckInterval from ", SignalCheckInterval, " to ", fixedInterval, " seconds");
+    }
+    
+    // Initialize arrays
+    ArrayResize(processedSignalIds, 1000);
+    processedSignalCount = 0;
+    ArrayResize(openTrades, 0);
+    openTradesCount = 0;
+    ArrayResize(pendingOrders, 0);
+    pendingOrdersCount = 0;
+    
+    // Load previously processed signals
+    LoadProcessedSignalIds();
+    
+    // Check trading permissions
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+    {
+        Print("❌ ERROR: Trading is not allowed in terminal");
+        return(INIT_FAILED);
+    }
+    
+    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+    {
+        Print("❌ ERROR: Expert Advisor trading is not allowed");
+        return(INIT_FAILED);
+    }
+    
+    // Initialize MT5 trading object
+    trade.SetExpertMagicNumber(magicNumber);
+    trade.SetMarginMode();
+    trade.SetTypeFillingBySymbol(Symbol());
+    
+    // Initialize symbol mapping and filters
+    InitializeSymbolMappings();
+    InitializeSymbolFilters();
+    
+    // Test signal file access
+    if(!TestSignalFileAccess())
+    {
+        Print("❌ ERROR: Cannot access signal file: ", SignalFilePath);
+        return(INIT_FAILED);
+    }
+    
+    // Set timer with validated interval
+    if(!EventSetTimer(fixedInterval))
+    {
+        Print("❌ ERROR: Failed to set timer");
+        return(INIT_FAILED);
+    }
+    
+    Print("✅ Licensed MT5 EA initialized successfully!");
+    Print("🔄 Continuous monitoring active - checking every ", fixedInterval, " seconds");
+    Print("📁 Monitoring file: ", SignalFilePath);
+    
+    // Initialize monitoring state
+    g_ContinuousMonitoring = true;
+    g_lastFileCheck = 0;
+    
+    UpdateComment();
+    
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    EventKillTimer();
+    
+    Print("═══════════════════════════════════════════");
+    Print("⏹️ LICENSED TELEGRAM EA MT5 STOPPED");
+    Print("═══════════════════════════════════════════");
+    Print("📊 Session Statistics:");
+    Print("   • Licensed Account: ", AccountInfoInteger(ACCOUNT_LOGIN));
+    Print("   • Broker: ", AccountInfoString(ACCOUNT_COMPANY));
+    Print("   • Signals Processed: ", totalSignalsProcessed);
+    Print("   • Trades Executed: ", totalTradesExecuted);
+    Print("   • Expired Signals: ", totalExpiredSignals);
+    Print("   • Symbols Filtered: ", totalSymbolsFiltered);
+    Print("   • Open Positions: ", openTradesCount);
+    Print("   • Pending Orders: ", pendingOrdersCount);
+    Print("📅 Stop Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+    Print("👤 Developer: islamahmed9717 | Licensed Version");
+    Print("═══════════════════════════════════════════");
+    
+    string reasonText = "";
+    switch(reason)
+    {
+        case REASON_PROGRAM: reasonText = "EA removed from chart"; break;
+        case REASON_REMOVE: reasonText = "EA removed manually"; break;
+        case REASON_RECOMPILE: reasonText = "EA recompiled"; break;
+        case REASON_CHARTCHANGE: reasonText = "Chart symbol/period changed"; break;
+        case REASON_CHARTCLOSE: reasonText = "Chart closed"; break;
+        case REASON_PARAMETERS: reasonText = "Input parameters changed"; break;
+        case REASON_ACCOUNT: reasonText = "Account changed"; break;
+        default: reasonText = "Unknown reason (" + IntegerToString(reason) + ")"; break;
+    }
+    
+    Print("🔍 Stop Reason: ", reasonText);
+    Comment("⏹️ EA STOPPED\n" +
+            "📊 Account: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\n" +
+            "📅 Time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + "\n" +
+            "👤 Licensed Version by islamahmed9717");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Process trailing stops
+   if(UseTrailingStop && openTradesCount > 0)
+      ProcessTrailingStops();
+   
+   // Process breakeven
+   if(MoveSLToBreakeven && openTradesCount > 0)
+      ProcessBreakeven();
+   
+   // Clean up closed positions
+   if(openTradesCount > 0)
+      CleanupClosedPositions();
+      
+   // Check pending order expiration
+   if(pendingOrdersCount > 0)
+      CheckPendingOrderExpiration();
+   
+   // Update comment periodically and cleanup
+   static int tickCount = 0;
+   tickCount++;
+   if(tickCount >= 100)
+   {
+      CleanupOldProcessedSignals();
+      UpdateComment();
+      tickCount = 0;
+   }
+}
+void CheckPendingOrderExpiration()
+{
+    if(PendingOrderExpirationHours <= 0)
+        return;
+        
+    datetime currentTime = TimeCurrent();
+    
+    for(int i = pendingOrdersCount - 1; i >= 0; i--)
+    {
+        if(pendingOrders[i].expireTime > 0 && currentTime >= pendingOrders[i].expireTime)
+        {
+            if(trade.OrderDelete(pendingOrders[i].ticket))
+            {
+                if(PrintToExpertLog)
+                    Print("⏰ Expired pending order deleted #", pendingOrders[i].ticket);
+                
+                // Remove from array
+                for(int j = i; j < pendingOrdersCount - 1; j++)
+                {
+                    pendingOrders[j] = pendingOrders[j + 1];
+                }
+                pendingOrdersCount--;
+                ArrayResize(pendingOrders, pendingOrdersCount);
+            }
+        }
+    }
+}
+
+void CleanupFilledPendingOrders()
+{
+    for(int i = pendingOrdersCount - 1; i >= 0; i--)
+    {
+        if(!orderInfo.Select(pendingOrders[i].ticket))
+        {
+            // Order no longer exists (filled or deleted)
+            if(PrintToExpertLog)
+                Print("📊 Pending order filled/deleted: #", pendingOrders[i].ticket);
+            
+            // Check if it was filled and add to positions tracking
+            if(positionInfo.SelectByTicket(pendingOrders[i].ticket))
+            {
+                AddToTrackingArray(pendingOrders[i].ticket, pendingOrders[i].symbol, 
+                                 pendingOrders[i].orderType, pendingOrders[i].lotSize,
+                                 positionInfo.PriceOpen(), pendingOrders[i].stopLoss, 
+                                 pendingOrders[i].takeProfit, pendingOrders[i].originalSymbol);
+                totalTradesExecuted++;
+            }
+            
+            // Remove from pending array
+            for(int j = i; j < pendingOrdersCount - 1; j++)
+            {
+                pendingOrders[j] = pendingOrders[j + 1];
+            }
+            pendingOrdersCount--;
+            ArrayResize(pendingOrders, pendingOrdersCount);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Timer function - Check for new signals                          |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    // HOURLY LICENSE CHECK
+    static datetime last_license_check = 0;
+    datetime current_time = TimeCurrent();
+    
+    if(current_time - last_license_check >= 3600) // Check every hour
+    {
+        if(!IsLicensed())
+        {
+            Print("⏰ HOURLY LICENSE CHECK: FAILED!");
+            Alert("❌ EA License expired or invalid! EA stopping...");
+            Comment("❌ LICENSE CHECK FAILED\n" +
+                    "⏰ EA stopped for security\n" +
+                    "📧 Contact: islamahmed9717@gmail.com\n" +
+                    "💰 Renew license to continue");
+            
+            ExpertRemove(); // Remove EA from chart
+            return;
+        }
+        
+        last_license_check = current_time;
+        Print("✅ Hourly license check: PASSED");
+    }
+    
+    // ===== ADD YOUR ORIGINAL OnTimer() CODE BELOW =====
+    
+    // Check if monitoring is enabled
+    if(!g_ContinuousMonitoring)
+    {
+        Print("⏸️ Monitoring paused");
+        return;
+    }
+    
+    // Always check for new signals
+    CheckForNewSignals();
+    
+    // Update trailing stops if enabled
+    if(UseTrailingStop && openTradesCount > 0)
+        ProcessTrailingStops();
+    
+    // Process breakeven if enabled
+    if(MoveSLToBreakeven && openTradesCount > 0)
+        ProcessBreakeven();
+    
+    // Clean up closed positions and orders
+    if(openTradesCount > 0)
+        CleanupClosedPositions();
+        
+    if(pendingOrdersCount > 0)
+        CleanupFilledPendingOrders();
+    
+    // Update display every 5 seconds
+    static datetime lastUIUpdate = 0;
+    if(TimeCurrent() - lastUIUpdate >= 5)
+    {
+        UpdateComment();
+        lastUIUpdate = TimeCurrent();
+    }
+    
+    // Cleanup old signals every minute
+    static datetime lastCleanup = 0;
+    if(TimeCurrent() - lastCleanup >= 60)
+    {
+        CleanupOldProcessedSignals();
+        lastCleanup = TimeCurrent();
+    }
+    
+    // Log monitoring status every minute
+    static datetime lastStatusLog = 0;
+    if(PrintToExpertLog && TimeCurrent() - lastStatusLog >= 60)
+    {
+        Print("📊 Licensed EA Active | Signals: ", totalSignalsProcessed, 
+              " | Trades: ", totalTradesExecuted,
+              " | Pending: ", pendingOrdersCount,
+              " | Time: ", TimeToString(TimeCurrent(), TIME_SECONDS));
+        lastStatusLog = TimeCurrent();
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| Initialize symbol mappings from input                           |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Initialize symbol mappings from input                           |
+//+------------------------------------------------------------------+
+void InitializeSymbolMappings()
+{
+    symbolMappingCount = 0;
+    
+    // First, try auto broker detection
+    if(BrokerSelection == BROKER_AUTO_DETECT)
+    {
+        AutoSetupBrokerMapping();
+    }
+    else
+    {
+        // Use user-selected broker
+        SetupSelectedBrokerMapping();
+    }
+    
+    // Then apply any manual overrides
+    if(UseManualMapping && StringLen(SymbolsMapping) > 0)
+    {
+        ApplyManualMappingOverrides();
+    }
+    
+    // Show final mapping summary
+    ShowMappingSummary();
+}
+
+bool IsLicensed()
+{
+    long account = AccountInfoInteger(ACCOUNT_LOGIN);
+    
+    // ===== ADD YOUR CUSTOMERS HERE =====
+    LicenseInfo customers[] = 
+    {
+        // {Account_Number, Year, Month, Day, "Customer_Name"}
+        {12345678, 2025, 12, 31, "John Smith"},        // Expires Dec 31, 2025
+        {87654321, 2025, 6, 15, "Mary Johnson"},       // Expires Jun 15, 2025
+        {11111111, 2025, 3, 1, "Demo Account"},        // Expires Mar 1, 2025
+        {22222222, 2026, 1, 1, "VIP Customer"},        // Expires Jan 1, 2026
+        {33333333, 2025, 8, 30, "Test User"},          // Expires Aug 30, 2025
+        {44444444, 2030, 12, 31, "Lifetime User"},     // Lifetime until 2030
+        {55555555, 2025, 7, 4, "July Customer"},       // Expires Jul 4, 2025
+        {66666666, 2025, 9, 15, "September User"},     // Expires Sep 15, 2025
+        {77777777, 2025, 11, 30, "November User"},     // Expires Nov 30, 2025
+        {88888888, 2026, 6, 1, "Premium Customer"},     // Expires Jun 1, 2026
+        {93484368, 2050,12,1, "The Owner"}
+    };
+    
+    int total_customers = ArraySize(customers);
+    
+    // Find customer account and check expiry
+    for(int i = 0; i < total_customers; i++)
+    {
+        if(customers[i].account == account)
+        {
+            // Found account - check if expired
+            datetime current_time = TimeCurrent();
+            datetime expiry_time = StringToTime(
+                IntegerToString(customers[i].expiry_year) + "." +
+                StringFormat("%02d", customers[i].expiry_month) + "." +
+                StringFormat("%02d", customers[i].expiry_day) + " 23:59:59"
+            );
+            
+            if(current_time <= expiry_time)
+            {
+                // Valid license
+                Print("✅ Licensed to: ", customers[i].customer_name);
+                Print("📅 Valid until: ", TimeToString(expiry_time, TIME_DATE));
+                
+                // Check for expiry warnings
+                int seconds_until_expiry = (int)(expiry_time - current_time);
+                int days_until_expiry = seconds_until_expiry / 86400;
+                
+                if(days_until_expiry <= 1)
+                {
+                    Alert("🚨 LICENSE EXPIRES TODAY! Contact islamahmed9717 to renew!");
+                }
+                else if(days_until_expiry <= 3)
+                {
+                    Alert("⚠️ License expires in " + IntegerToString(days_until_expiry) + " days! Renew now!");
+                }
+                else if(days_until_expiry <= 7)
+                {
+                    Print("📅 FYI: License expires in ", days_until_expiry, " days");
+                }
+                
+                return true; // License valid
+            }
+            else
+            {
+                // License expired
+                Print("⏰ License EXPIRED for: ", customers[i].customer_name);
+                Print("📅 Expired on: ", TimeToString(expiry_time, TIME_DATE));
+                
+                Alert("⏰ EA LICENSE EXPIRED on " + TimeToString(expiry_time, TIME_DATE));
+                Comment("⏰ LICENSE EXPIRED\n" +
+                        "👤 Customer: " + customers[i].customer_name + "\n" +
+                        "📅 Expired: " + TimeToString(expiry_time, TIME_DATE) + "\n" +
+                        "💰 Renew: Contact islamahmed9717\n" +
+                        "📧 Email: your_email@gmail.com\n" +
+                        "💵 Price: $200\n" +
+                        "🔢 Account: " + IntegerToString(account));
+                return false; // License expired
+            }
+        }
+    }
+    
+    // Account not found
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Auto-detect and setup broker mapping                           |
+//+------------------------------------------------------------------+
+void AutoSetupBrokerMapping()
+{
+    Print("🤖 AUTO-DETECTING BROKER...");
+    Print("═══════════════════════════════════════════");
+    
+    string brokerName = AccountInfoString(ACCOUNT_COMPANY);
+    string brokerServer = AccountInfoString(ACCOUNT_SERVER);
+    
+    Print("📊 Account Company: ", brokerName);
+    Print("📊 Server Name: ", brokerServer);
+    
+    // Convert to lowercase for comparison
+    string brokerLower = brokerName;
+    StringToLower(brokerLower);
+    
+    // Detect broker
+    if(StringFind(brokerLower, "exness") >= 0)
+    {
+        Print("✅ Detected: EXNESS");
+        SetupExnessMapping();
+    }
+    else if(StringFind(brokerLower, "equiti") >= 0)
+    {
+        Print("✅ Detected: EQUITI");
+        SetupEquitiMapping();
+    }
+    else if(StringFind(brokerLower, "one royal") >= 0 || StringFind(brokerLower, "oneroyal") >= 0)
+    {
+        Print("✅ Detected: ONE ROYAL");
+        SetupOneRoyalMapping();
+    }
+    else if(StringFind(brokerLower, "ic markets") >= 0 || StringFind(brokerLower, "icmarkets") >= 0)
+    {
+        Print("✅ Detected: IC MARKETS");
+        SetupICMarketsMapping();
+    }
+    else
+    {
+        Print("⚠️ Unknown broker: ", brokerName);
+        Print("💡 Using default mapping. Select your broker manually for better results.");
+        SetupDefaultMapping();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Setup user-selected broker mapping                             |
+//+------------------------------------------------------------------+
+void SetupSelectedBrokerMapping()
+{
+    switch(BrokerSelection)
+    {
+        case BROKER_EXNESS:
+            SetupExnessMapping();
+            break;
+        case BROKER_EQUITI:
+            SetupEquitiMapping();
+            break;
+        case BROKER_ONE_ROYAL:
+            SetupOneRoyalMapping();
+            break;
+        case BROKER_IC_MARKETS:
+            SetupICMarketsMapping();
+            break;
+        case BROKER_MANUAL:
+            Print("📝 Using manual mapping only");
+            break;
+    }
+}
+//+------------------------------------------------------------------+
+//| EXNESS BROKER MAPPING                                          |
+//+------------------------------------------------------------------+
+void SetupExnessMapping()
+{
+    Print("🏦 Setting up EXNESS symbol mapping...");
+    
+    // Detect account type
+    string suffix = "";
+    
+    if(ExnessAccountType == EXNESS_AUTO_DETECT)
+    {
+        // Try to detect by checking symbol availability
+        if(SymbolSelect("EURUSD.a", false)) suffix = ".a";
+        else if(SymbolSelect("EURUSD.z", false)) suffix = ".z";
+        else if(SymbolSelect("EURUSD.r", false)) suffix = ".r";
+        else suffix = ""; // Standard account
+        
+        Print("🔍 Auto-detected account suffix: ", suffix == "" ? "Standard (no suffix)" : suffix);
+    }
+    else
+    {
+        switch(ExnessAccountType)
+        {
+            case EXNESS_STANDARD: suffix = ""; break;
+            case EXNESS_PRO: suffix = ".a"; break;
+            case EXNESS_ZERO: suffix = ".z"; break;
+            case EXNESS_RAW: suffix = ".r"; break;
+        }
+    }
+    
+    // FOREX PAIRS
+    AddMapping("EURUSD", "EURUSD" + suffix);
+    AddMapping("GBPUSD", "GBPUSD" + suffix);
+    AddMapping("USDJPY", "USDJPY" + suffix);
+    AddMapping("USDCHF", "USDCHF" + suffix);
+    AddMapping("AUDUSD", "AUDUSD" + suffix);
+    AddMapping("USDCAD", "USDCAD" + suffix);
+    AddMapping("NZDUSD", "NZDUSD" + suffix);
+    AddMapping("EURGBP", "EURGBP" + suffix);
+    AddMapping("EURJPY", "EURJPY" + suffix);
+    AddMapping("GBPJPY", "GBPJPY" + suffix);
+    AddMapping("GBPCHF", "GBPCHF" + suffix);
+    AddMapping("EURCHF", "EURCHF" + suffix);
+    AddMapping("AUDCHF", "AUDCHF" + suffix);
+    AddMapping("AUDJPY", "AUDJPY" + suffix);
+    AddMapping("AUDNZD", "AUDNZD" + suffix);
+    AddMapping("NZDCHF", "NZDCHF" + suffix);
+    AddMapping("NZDJPY", "NZDJPY" + suffix);
+    AddMapping("CHFJPY", "CHFJPY" + suffix);
+    AddMapping("CADCHF", "CADCHF" + suffix);
+    AddMapping("CADJPY", "CADJPY" + suffix);
+    AddMapping("EURAUD", "EURAUD" + suffix);
+    AddMapping("EURCAD", "EURCAD" + suffix);
+    AddMapping("EURNZD", "EURNZD" + suffix);
+    AddMapping("GBPAUD", "GBPAUD" + suffix);
+    AddMapping("GBPCAD", "GBPCAD" + suffix);
+    AddMapping("GBPNZD", "GBPNZD" + suffix);
+    
+    // METALS
+    AddMapping("GOLD", "XAUUSD" + suffix);
+    AddMapping("XAUUSD", "XAUUSD" + suffix);
+    AddMapping("SILVER", "XAGUSD" + suffix);
+    AddMapping("XAGUSD", "XAGUSD" + suffix);
+    
+    // INDICES
+    AddMapping("US30", "US30Cash");
+    AddMapping("DOW", "US30Cash");
+    AddMapping("NAS100", "NAS100Cash");
+    AddMapping("NASDAQ", "NAS100Cash");
+    AddMapping("SPX500", "SPX500Cash");
+    AddMapping("SP500", "SPX500Cash");
+    AddMapping("UK100", "UK100Cash");
+    AddMapping("FTSE", "UK100Cash");
+    AddMapping("GER30", "GER30Cash");
+    AddMapping("GER40", "GER40Cash");
+    AddMapping("DAX", "GER40Cash");
+    AddMapping("FRA40", "FRA40Cash");
+    AddMapping("JPN225", "JPN225Cash");
+    AddMapping("NIKKEI", "JPN225Cash");
+    AddMapping("AUS200", "AUS200Cash");
+    
+    // COMMODITIES
+    AddMapping("OIL", "USOILCash");
+    AddMapping("CRUDE", "USOILCash");
+    AddMapping("WTI", "USOILCash");
+    AddMapping("BRENT", "UKOILCash");
+    AddMapping("UKOIL", "UKOILCash");
+    AddMapping("NATGAS", "NATGASCash");
+    
+    // CRYPTO
+    AddMapping("BITCOIN", "BTCUSD");
+    AddMapping("BTC", "BTCUSD");
+    AddMapping("ETHEREUM", "ETHUSD");
+    AddMapping("ETH", "ETHUSD");
+    
+    Print("✅ EXNESS mapping configured with ", symbolMappingCount, " symbols");
+}
+
+//+------------------------------------------------------------------+
+//| EQUITI BROKER MAPPING                                          |
+//+------------------------------------------------------------------+
+void SetupEquitiMapping()
+{
+    Print("🏦 Setting up EQUITI symbol mapping...");
+    
+    // Check for suffix
+    string suffix = "";
+    if(SymbolSelect("EURUSD.m", false)) suffix = ".m";
+    
+    // FOREX PAIRS
+    AddMapping("EURUSD", "EURUSD" + suffix);
+    AddMapping("GBPUSD", "GBPUSD" + suffix);
+    AddMapping("USDJPY", "USDJPY" + suffix);
+    AddMapping("USDCHF", "USDCHF" + suffix);
+    AddMapping("AUDUSD", "AUDUSD" + suffix);
+    AddMapping("USDCAD", "USDCAD" + suffix);
+    AddMapping("NZDUSD", "NZDUSD" + suffix);
+    AddMapping("EURGBP", "EURGBP" + suffix);
+    AddMapping("EURJPY", "EURJPY" + suffix);
+    AddMapping("GBPJPY", "GBPJPY" + suffix);
+    
+    // METALS
+    AddMapping("GOLD", "XAUUSD" + suffix);
+    AddMapping("XAUUSD", "XAUUSD" + suffix);
+    AddMapping("SILVER", "XAGUSD" + suffix);
+    
+    // INDICES (Equiti specific)
+    AddMapping("US30", "US30");
+    AddMapping("DOW", "US30");
+    AddMapping("NAS100", "USTEC");
+    AddMapping("NASDAQ", "USTEC");
+    AddMapping("SPX500", "US500");
+    AddMapping("SP500", "US500");
+    AddMapping("UK100", "UK100");
+    AddMapping("GER30", "GER30");
+    AddMapping("GER40", "GER40");
+    AddMapping("DAX", "GER40");
+    
+    // COMMODITIES
+    AddMapping("OIL", "USOIL");
+    AddMapping("CRUDE", "USOIL");
+    AddMapping("BRENT", "UKOIL");
+    
+    Print("✅ EQUITI mapping configured with ", symbolMappingCount, " symbols");
+}
+//+------------------------------------------------------------------+
+//| ONE ROYAL BROKER MAPPING                                        |
+//+------------------------------------------------------------------+
+void SetupOneRoyalMapping()
+{
+    Print("🏦 Setting up ONE ROYAL symbol mapping...");
+    
+    // FOREX - One Royal typically uses standard names
+    AddMapping("EURUSD", "EURUSD");
+    AddMapping("GBPUSD", "GBPUSD");
+    AddMapping("USDJPY", "USDJPY");
+    AddMapping("USDCHF", "USDCHF");
+    AddMapping("AUDUSD", "AUDUSD");
+    AddMapping("USDCAD", "USDCAD");
+    AddMapping("NZDUSD", "NZDUSD");
+    
+    // METALS
+    AddMapping("GOLD", "XAUUSD");
+    AddMapping("XAUUSD", "XAUUSD");
+    AddMapping("SILVER", "XAGUSD");
+    
+    // INDICES
+    AddMapping("US30", "US30");
+    AddMapping("DOW", "US30");
+    AddMapping("NAS100", "NAS100");
+    AddMapping("NASDAQ", "NAS100");
+    AddMapping("SPX500", "SPX500");
+    AddMapping("SP500", "SPX500");
+    
+    // COMMODITIES
+    AddMapping("OIL", "USOIL");
+    AddMapping("CRUDE", "USOIL");
+    AddMapping("BRENT", "UKOIL");
+    
+    Print("✅ ONE ROYAL mapping configured with ", symbolMappingCount, " symbols");
+}
+
+//+------------------------------------------------------------------+
+//| IC MARKETS BROKER MAPPING                                       |
+//+------------------------------------------------------------------+
+void SetupICMarketsMapping()
+{
+    Print("🏦 Setting up IC MARKETS symbol mapping...");
+    
+    // FOREX - IC Markets uses clean symbols
+    AddMapping("EURUSD", "EURUSD");
+    AddMapping("GBPUSD", "GBPUSD");
+    AddMapping("USDJPY", "USDJPY");
+    AddMapping("USDCHF", "USDCHF");
+    AddMapping("AUDUSD", "AUDUSD");
+    AddMapping("USDCAD", "USDCAD");
+    AddMapping("NZDUSD", "NZDUSD");
+    AddMapping("EURGBP", "EURGBP");
+    AddMapping("EURJPY", "EURJPY");
+    AddMapping("GBPJPY", "GBPJPY");
+    
+    // METALS
+    AddMapping("GOLD", "XAUUSD");
+    AddMapping("XAUUSD", "XAUUSD");
+    AddMapping("SILVER", "XAGUSD");
+    
+    // INDICES - IC Markets uses # prefix
+    AddMapping("US30", "#US30");
+    AddMapping("DOW", "#US30");
+    AddMapping("NAS100", "#NAS100");
+    AddMapping("NASDAQ", "#NAS100");
+    AddMapping("SPX500", "#SPX500");
+    AddMapping("SP500", "#SPX500");
+    AddMapping("UK100", "#UK100");
+    AddMapping("FTSE", "#UK100");
+    AddMapping("GER30", "#GER30");
+    AddMapping("GER40", "#GER40");
+    AddMapping("DAX", "#GER40");
+    AddMapping("AUS200", "#AUS200");
+    
+    // COMMODITIES
+    AddMapping("OIL", "#WTI");
+    AddMapping("CRUDE", "#WTI");
+    AddMapping("WTI", "#WTI");
+    AddMapping("BRENT", "#BRENT");
+    
+    // CRYPTO
+    AddMapping("BITCOIN", "#BTCUSD");
+    AddMapping("BTC", "#BTCUSD");
+    AddMapping("ETHEREUM", "#ETHUSD");
+    AddMapping("ETH", "#ETHUSD");
+    
+    Print("✅ IC MARKETS mapping configured with ", symbolMappingCount, " symbols");
+}
+
+//+------------------------------------------------------------------+
+//| DEFAULT BROKER MAPPING                                          |
+//+------------------------------------------------------------------+
+void SetupDefaultMapping()
+{
+    Print("🏦 Setting up DEFAULT symbol mapping...");
+    
+    // Basic mappings that work with most brokers
+    AddMapping("GOLD", "XAUUSD");
+    AddMapping("SILVER", "XAGUSD");
+    AddMapping("US30", "US30");
+    AddMapping("DOW", "US30");
+    AddMapping("NAS100", "NAS100");
+    AddMapping("NASDAQ", "NAS100");
+    AddMapping("OIL", "USOIL");
+    AddMapping("CRUDE", "USOIL");
+    AddMapping("BITCOIN", "BTCUSD");
+    AddMapping("BTC", "BTCUSD");
+    
+    Print("✅ DEFAULT mapping configured with ", symbolMappingCount, " symbols");
+}
+
+
+//+------------------------------------------------------------------+
+//| Add symbol mapping helper                                       |
+//+------------------------------------------------------------------+
+void AddMapping(string from, string to)
+{
+    if(symbolMappingCount >= ArraySize(symbolMappings))
+    {
+        ArrayResize(symbolMappings, symbolMappingCount + 50);
+    }
+    
+    symbolMappings[symbolMappingCount][0] = from;
+    symbolMappings[symbolMappingCount][1] = to;
+    symbolMappingCount++;
+}
+
+//+------------------------------------------------------------------+
+//| Apply manual mapping overrides                                  |
+//+------------------------------------------------------------------+
+void ApplyManualMappingOverrides()
+{
+    Print("📝 Applying manual mapping overrides...");
+    
+    string mappings[];
+    int mappingCount = StringSplit(SymbolsMapping, ',', mappings);
+    
+    for(int i = 0; i < mappingCount; i++)
+    {
+        string mapping = mappings[i];
+        StringTrimLeft(mapping);
+        StringTrimRight(mapping);
+        
+        string parts[];
+        if(StringSplit(mapping, ':', parts) == 2)
+        {
+            string from = parts[0];
+            string to = parts[1];
+            StringTrimLeft(from);
+            StringTrimRight(from);
+            StringTrimLeft(to);
+            StringTrimRight(to);
+            
+            // Check if mapping already exists and update it
+            bool found = false;
+            for(int j = 0; j < symbolMappingCount; j++)
+            {
+                if(symbolMappings[j][0] == from)
+                {
+                    symbolMappings[j][1] = to;
+                    found = true;
+                    Print("🔄 Updated mapping: ", from, " → ", to);
+                    break;
+                }
+            }
+            
+            // Add new mapping if not found
+            if(!found)
+            {
+                AddMapping(from, to);
+                Print("➕ Added mapping: ", from, " → ", to);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Show mapping summary                                            |
+//+------------------------------------------------------------------+
+void ShowMappingSummary()
+{
+    Print("═══════════════════════════════════════════");
+    Print("📊 SYMBOL MAPPING SUMMARY");
+    Print("═══════════════════════════════════════════");
+    Print("🏦 Broker: ", AccountInfoString(ACCOUNT_COMPANY));
+    Print("📋 Total Mappings: ", symbolMappingCount);
+    
+    // Test some common symbols
+    TestSymbolMapping("GOLD");
+    TestSymbolMapping("EURUSD");
+    TestSymbolMapping("US30");
+    TestSymbolMapping("BITCOIN");
+    
+    Print("═══════════════════════════════════════════");
+}
+
+//+------------------------------------------------------------------+
+//| Test symbol mapping                                             |
+//+------------------------------------------------------------------+
+void TestSymbolMapping(string symbol)
+{
+    string mapped = ApplySymbolMapping(symbol);
+    bool exists = SymbolSelect(mapped, false);
+    
+    Print("• ", symbol, " → ", mapped, " ", exists ? "✅" : "❌");
+}
+
+
+string GenerateSignalHash(string channelId, string symbol, string direction, datetime timestamp)
+{
+    // Create deterministic string from signal components
+    string hashSource = channelId + "|" + symbol + "|" + direction + "|" + TimeToString(timestamp, TIME_DATE|TIME_MINUTES);
+    
+    // Same hash algorithm as C#
+    int hash = 0;
+    for(int i = 0; i < StringLen(hashSource); i++)
+    {
+        hash = ((hash * 31) + StringGetCharacter(hashSource, i)) % 1000000;
+    }
+    
+    // Return hash with timestamp suffix
+    return IntegerToString(hash) + "_" + TimeToString(timestamp, TIME_DATE|TIME_MINUTES);
+}
+
+//+------------------------------------------------------------------+
+//| Initialize symbol filters                                        |
+//+------------------------------------------------------------------+
+void InitializeSymbolFilters()
+{
+   // Initialize excluded symbols
+   excludedSymbolsCount = 0;
+   if(StringLen(ExcludedSymbols) > 0)
+   {
+      excludedSymbolsCount = StringSplit(ExcludedSymbols, ',', excludedSymbolsList);
+      
+      if(excludedSymbolsCount > 0)
+      {
+         for(int i = 0; i < excludedSymbolsCount; i++)
+         {
+            StringTrimLeft(excludedSymbolsList[i]);
+            StringTrimRight(excludedSymbolsList[i]);
+            StringToUpper(excludedSymbolsList[i]);
+         }
+         
+         Print("🚫 MT5 Excluded symbols: ", excludedSymbolsCount, " configured");
+      }
+   }
+   
+   // Initialize allowed symbols (whitelist)
+   allowedSymbolsCount = 0;
+   if(StringLen(SymbolsToTrade) > 0)
+   {
+      allowedSymbolsCount = StringSplit(SymbolsToTrade, ',', allowedSymbolsList);
+      
+      if(allowedSymbolsCount > 0)
+      {
+         for(int i = 0; i < allowedSymbolsCount; i++)
+         {
+            StringTrimLeft(allowedSymbolsList[i]);
+            StringTrimRight(allowedSymbolsList[i]);
+            StringToUpper(allowedSymbolsList[i]);
+         }
+         
+         Print("✅ MT5 Allowed symbols (whitelist): ", allowedSymbolsCount, " configured");
+      }
+   }
+   
+   // Initialize skip prefix/suffix list
+   skipPrefixSuffixCount = 0;
+   if(StringLen(SkipSuffixPrefixPairs) > 0)
+   {
+      skipPrefixSuffixCount = StringSplit(SkipSuffixPrefixPairs, ',', skipPrefixSuffixList);
+      
+      if(skipPrefixSuffixCount > 0)
+      {
+         for(int i = 0; i < skipPrefixSuffixCount; i++)
+         {
+            StringTrimLeft(skipPrefixSuffixList[i]);
+            StringTrimRight(skipPrefixSuffixList[i]);
+            StringToUpper(skipPrefixSuffixList[i]);
+         }
+         
+         Print("⏭️ MT5 Skip prefix/suffix pairs: ", skipPrefixSuffixCount, " configured");
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Test signal file access                                         |
+//+------------------------------------------------------------------+
+bool TestSignalFileAccess()
+{
+   int fileHandle = FileOpen("telegram_signals.txt",
+                            FILE_READ | 
+                            FILE_SHARE_READ | 
+                            FILE_SHARE_WRITE | 
+                            FILE_TXT | 
+                            FILE_ANSI);
+   
+   if(fileHandle == INVALID_HANDLE)
+   {
+      // Try to create the file if it doesn't exist
+      fileHandle = FileOpen("telegram_signals.txt", 
+                           FILE_WRITE | 
+                           FILE_SHARE_READ | 
+                           FILE_SHARE_WRITE | 
+                           FILE_TXT | 
+                           FILE_ANSI);
+      if(fileHandle == INVALID_HANDLE)
+      {
+         int errorCode = GetLastError();
+         Print("❌ Cannot create signal file: telegram_signals.txt");
+         Print("💡 Error code: ", errorCode);
+         Print("💡 Check if MT4/MT5 Files path is correctly set in Windows app");
+         Print("💡 Ensure Windows app has write permissions to the folder");
+         return false;
+      }
+      
+      // Write initial header with current format including ORDER_TYPE
+      FileWriteString(fileHandle, "# Telegram EA MT5 Signal File - islamahmed9717\n");
+      FileWriteString(fileHandle, "# Created: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + "\n");
+      FileWriteString(fileHandle, "# Signal Expiry: " + IntegerToString(MaxSignalAgeMinutes) + " minutes\n");
+      FileWriteString(fileHandle, "# Platform: MetaTrader 5\n");
+      FileWriteString(fileHandle, "# Format: TIMESTAMP|CHANNEL_ID|CHANNEL_NAME|DIRECTION|SYMBOL|ENTRY|SL|TP1|TP2|TP3|STATUS|ORDER_TYPE\n");
+      FileWriteString(fileHandle, "# Status values: NEW (ready to process), PROCESSED (already handled)\n");
+      FileWriteString(fileHandle, "# Order types: MARKET, LIMIT, STOP\n\n");
+   }
+   
+   FileClose(fileHandle);
+   Print("✅ MT5 Signal file access confirmed: telegram_signals.txt");
+   return true;
+}
+
+// --- incremental-read pointers -----------------------------------
+static long   g_lastPos  = 0;   // byte offset already processed
+static ulong  g_lastSize = 0;   // file size last time we checked
+
+//+------------------------------------------------------------------+
+//| Check for new signals from file - MT5 VERSION                   |
+//+------------------------------------------------------------------+
+void CheckForNewSignals()
+{
+    if(!IsTimeToTrade())
+        return;
+    
+    datetime currentTime = TimeCurrent();
+    if(currentTime - g_lastFileCheck < 3)
+        return;
+    g_lastFileCheck = currentTime;
+    
+    string filename = "telegram_signals.txt";
+    
+    int fileHandle = FileOpen(filename, FILE_READ|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    if(fileHandle == INVALID_HANDLE)
+    {
+        if(PrintToExpertLog && totalSignalsProcessed == 0)
+            Print("📁 Signal file not found: ", filename);
+        return;
+    }
+    
+    FileSeek(fileHandle, 0, SEEK_END);
+    int currentFileSize = (int)FileTell(fileHandle);
+    
+    if(currentFileSize < g_lastFileSize)
+    {
+        g_lastFileSize = 0;
+        g_lastProcessedLine = 0;
+        Print("📝 Signal file was reset");
+    }
+    
+    if(currentFileSize == g_lastFileSize)
+    {
+        FileClose(fileHandle);
+        return;
+    }
+    
+    FileSeek(fileHandle, g_lastFileSize, SEEK_SET);
+    
+    int newSignalsCount = 0;
+    int newLinesRead = 0;
+    
+    while(!FileIsEnding(fileHandle))
+    {
+        string line = FileReadString(fileHandle);
+        if(FileIsEnding(fileHandle) && StringLen(line) == 0)
+            break;
+        
+        newLinesRead++;
+        StringTrimLeft(line);
+        StringTrimRight(line);
+        
+        if(StringLen(line) == 0 || StringFind(line, "#") == 0)
+            continue;
+        
+        if(StringFind(line, "|NEW") > 0)
+        {
+            newSignalsCount++;
+            ProcessEnhancedSignalLine(line);  // Use enhanced processing
+        }
+    }
+    
+    g_lastFileSize = currentFileSize;
+    
+    FileClose(fileHandle);
+    
+    if(PrintToExpertLog && newSignalsCount > 0)
+    {
+        Print("✅ Found ", newSignalsCount, " NEW signals in ", newLinesRead, " new lines");
+    }
+}
+bool ProcessEnhancedSignalLine(string line)
+{
+    string parts[];
+    int partCount = StringSplit(line, '|', parts);
+    
+    // Now expecting 12 parts with ORDER_TYPE
+    if(partCount < 12)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Invalid signal format. Expected 12 parts, got: ", partCount);
+        return false;
+    }
+    
+    // Check signal status first
+    string signalStatus = parts[10];
+    StringTrimLeft(signalStatus);
+    StringTrimRight(signalStatus);
+    
+    if(signalStatus != "NEW")
+    {
+        return false;
+    }
+    
+    // Parse timestamp
+    string timestampStr = parts[0];
+    StringTrimLeft(timestampStr);
+    StringTrimRight(timestampStr);
+    datetime signalTime = ParseTimestamp(timestampStr);
+    
+    datetime currentServerTime = TimeCurrent();
+    
+    // Calculate age in minutes
+    long signalAgeSeconds = currentServerTime - signalTime;
+    long signalAgeMinutes = signalAgeSeconds / 60;
+    
+    if(signalAgeMinutes < 0)
+    {
+        signalAgeMinutes = 0;
+    }
+    
+    // Check if signal is expired
+    if(signalAgeMinutes > MaxSignalAgeMinutes)
+    {
+        if(PrintToExpertLog)
+        {
+            Print("⏰ SIGNAL EXPIRED:");
+            Print("   Signal age: ", signalAgeMinutes, " minutes");
+            Print("   Maximum allowed: ", MaxSignalAgeMinutes, " minutes");
+        }
+        
+        totalExpiredSignals++;
+        MarkSignalAsProcessedInFile(line);
+        return false;
+    }
+    
+    // Generate unique signal ID
+    string uniqueKey = parts[0] + "_" + parts[1] + "_" + parts[4] + "_" + parts[3];
+    string signalId = GenerateSignalId(uniqueKey);
+    
+    // Check if already processed
+    if(IsSignalAlreadyProcessed(signalId))
+    {
+        if(PrintToExpertLog)
+            Print("⏭️ Signal already processed (ID: ", signalId, ")");
+        return false;
+    }
+    
+    // Create signal object with ORDER TYPE
+    TelegramSignal signal;
+    signal.signalId = signalId;
+    signal.signalTime = signalTime;
+    signal.receivedTime = currentServerTime;
+    signal.channelId = parts[1];
+    signal.channelName = parts[2];
+    signal.direction = parts[3];
+    signal.originalSymbol = parts[4];
+    signal.entryPrice = StringToDouble(parts[5]);
+    signal.stopLoss = StringToDouble(parts[6]);
+    signal.takeProfit1 = StringToDouble(parts[7]);
+    signal.takeProfit2 = StringToDouble(parts[8]);
+    signal.takeProfit3 = StringToDouble(parts[9]);
+    signal.orderType = parts[11];  // NEW: Read ORDER_TYPE
+    signal.originalText = line;
+    signal.finalSymbol = ProcessSymbolTransformation(signal.originalSymbol);
+    signal.isExpired = false;
+    signal.isProcessed = false;
+    
+    StringTrimLeft(signal.orderType);
+    StringTrimRight(signal.orderType);
+    
+    if(PrintToExpertLog)
+    {
+        Print("🆕 PROCESSING SIGNAL:");
+        Print("   Signal ID: ", signalId);
+        Print("   Symbol: ", signal.originalSymbol, " → ", signal.finalSymbol);
+        Print("   Direction: ", signal.direction);
+        Print("   Order Type: ", signal.orderType);  // Show order type
+        Print("   Entry: ", signal.entryPrice);
+        Print("   Age: ", signalAgeMinutes, " minutes");
+    }
+    
+    // Check for opposite signal to delete pending orders
+    if(DeletePendingOnOpposite)
+    {
+        CheckAndDeleteOppositePendingOrders(signal);
+    }
+    
+    // Validate and process
+    if(ValidateSignal(signal))
+    {
+        if(PrintToExpertLog)
+            Print("✅ Signal validation passed, executing trades...");
+            
+        ProcessValidatedSignal(signal);
+        AddToProcessedSignals(signal.signalId);
+        MarkSignalAsProcessedInFile(line);
+        
+        return true;
+    }
+    else
+    {
+        if(PrintToExpertLog)
+            Print("❌ Signal validation failed");
+        
+        AddToProcessedSignals(signal.signalId);
+        MarkSignalAsProcessedInFile(line);
+        return false;
+    }
+}
+
+
+bool IsFileBeingWritten(string filepath)
+{
+    // Try to open file for write access
+    int testHandle = FileOpen(filepath, FILE_WRITE|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    
+    if(testHandle == INVALID_HANDLE)
+    {
+        // Check specific error
+        int error = GetLastError();
+        if(error == 5004 || error == 5002)  // File is locked or access denied
+        {
+            return true;  // File is being written
+        }
+        return false;  // Other error
+    }
+    
+    // File is not being written, close it
+    FileClose(testHandle);
+    return false;
+}
+
+
+bool ProcessFormattedSignalLineFixed(string line)
+{
+    string parts[];
+    int partCount = StringSplit(line, '|', parts);
+    
+    if(partCount < 11)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Invalid signal format. Expected 11 parts, got: ", partCount);
+        return false;
+    }
+    
+    // Check signal status first
+    string signalStatus = parts[10];
+    StringTrimLeft(signalStatus);
+    StringTrimRight(signalStatus);
+    
+    if(signalStatus != "NEW")
+    {
+        return false; // Skip processed signals
+    }
+    
+    // Parse timestamp
+    string timestampStr = parts[0];
+    StringTrimLeft(timestampStr);
+    StringTrimRight(timestampStr);
+    datetime signalTime = ParseTimestamp(timestampStr);
+    
+    // FIXED: Use TimeCurrent() which is server time
+    datetime currentServerTime = TimeCurrent();
+    
+    if(PrintToExpertLog)
+    {
+        Print("📊 TIMESTAMP ANALYSIS:");
+        Print("   Signal Time: ", TimeToString(signalTime, TIME_DATE|TIME_SECONDS));
+        Print("   Server Time: ", TimeToString(currentServerTime, TIME_DATE|TIME_SECONDS));
+        Print("   Time Zone: ", TimeToString(currentServerTime, TIME_DATE|TIME_SECONDS), " (Server)");
+    }
+    
+    // Calculate age in minutes
+    long signalAgeSeconds = currentServerTime - signalTime;
+    long signalAgeMinutes = signalAgeSeconds / 60;
+    
+    if(PrintToExpertLog)
+    {
+        Print("⏰ Age calculation:");
+        Print("   Age in seconds: ", signalAgeSeconds);
+        Print("   Age in minutes: ", signalAgeMinutes);
+        Print("   Max allowed minutes: ", MaxSignalAgeMinutes);
+    }
+    
+    // Handle negative age (signal from future - likely timezone issue)
+    if(signalAgeMinutes < 0)
+    {
+        if(PrintToExpertLog)
+        {
+            Print("⚠️ NEGATIVE AGE DETECTED!");
+            Print("   This usually means timezone mismatch between EA and signal source");
+            Print("   Signal appears to be from the future by ", MathAbs(signalAgeMinutes), " minutes");
+            Print("   Treating as FRESH signal (age = 0)");
+        }
+        signalAgeMinutes = 0; // Treat as fresh
+    }
+    
+    // Check if signal is expired
+    if(signalAgeMinutes > MaxSignalAgeMinutes)
+    {
+        if(PrintToExpertLog)
+        {
+            Print("⏰ SIGNAL EXPIRED:");
+            Print("   Signal age: ", signalAgeMinutes, " minutes");
+            Print("   Maximum allowed: ", MaxSignalAgeMinutes, " minutes");
+            Print("   Difference: ", (signalAgeMinutes - MaxSignalAgeMinutes), " minutes over limit");
+        }
+        
+        totalExpiredSignals++;
+        MarkSignalAsProcessedInFileFixed(line); // Mark as processed to avoid re-checking
+        return false;
+    }
+    
+    // Generate unique signal ID
+    string uniqueKey = parts[0] + "_" + parts[1] + "_" + parts[4] + "_" + parts[3];
+    string signalId = GenerateSignalId(uniqueKey);
+    
+    // Check if already processed
+    if(IsSignalAlreadyProcessedFixed(signalId))
+    {
+        if(PrintToExpertLog)
+            Print("⏭️ Signal already processed (ID: ", signalId, ")");
+        return false;
+    }
+    
+    if(PrintToExpertLog)
+    {
+        Print("🆕 PROCESSING FRESH SIGNAL:");
+        Print("   Signal ID: ", signalId);
+        Print("   Age: ", signalAgeMinutes, " minutes");
+        Print("   Status: VALID & FRESH");
+    }
+    
+    // Create signal object
+    TelegramSignal signal;
+    signal.signalId = signalId;
+    signal.signalTime = signalTime;
+    signal.receivedTime = currentServerTime;
+    signal.channelId = StringToInteger(parts[1]);
+    signal.channelName = parts[2];
+    signal.direction = parts[3];
+    signal.originalSymbol = parts[4];
+    signal.entryPrice = StringToDouble(parts[5]);
+    signal.stopLoss = StringToDouble(parts[6]);
+    signal.takeProfit1 = StringToDouble(parts[7]);
+    signal.takeProfit2 = StringToDouble(parts[8]);
+    signal.takeProfit3 = StringToDouble(parts[9]);
+    signal.originalText = line;
+    signal.finalSymbol = ProcessSymbolTransformation(signal.originalSymbol);
+    signal.isExpired = false;
+    signal.isProcessed = false;
+    
+    // Validate and process
+    if(ValidateSignal(signal))
+    {
+        if(PrintToExpertLog)
+            Print("✅ Signal validation passed, executing trades...");
+            
+        ProcessValidatedSignal(signal);
+        AddToProcessedSignals(signal.signalId);
+        MarkSignalAsProcessedInFileFixed(line);
+        
+        return true;
+    }
+    else
+    {
+        if(PrintToExpertLog)
+            Print("❌ Signal validation failed");
+        
+        AddToProcessedSignals(signal.signalId); // Still mark as processed to avoid re-checking
+        MarkSignalAsProcessedInFileFixed(line);
+        return false;
+    }
+}
+
+
+bool IsSignalAlreadyProcessedFixed(string signalId)
+{
+    // Check in-memory array
+    for(int i = 0; i < processedSignalCount; i++)
+    {
+        if(processedSignalIds[i] == signalId)
+            return true;
+    }
+    
+    // Also check in the persistent file for safety
+    string filename = processedSignalIdsFile;
+    int fileHandle = FileOpen(filename, FILE_READ|FILE_TXT|FILE_ANSI);
+    if(fileHandle != INVALID_HANDLE)
+    {
+        while(!FileIsEnding(fileHandle))
+        {
+            string line = FileReadString(fileHandle);
+            if(StringFind(line, signalId) >= 0)
+            {
+                FileClose(fileHandle);
+                // Add to memory array for faster future checks
+                if(processedSignalCount < ArraySize(processedSignalIds))
+                {
+                    processedSignalIds[processedSignalCount] = signalId;
+                    processedSignalCount++;
+                }
+                return true;
+            }
+        }
+        FileClose(fileHandle);
+    }
+    
+    return false;
+}
+void MarkSignalAsProcessedInFileFixed(string originalLine)
+{
+    // FIXED: Simple replacement without reading entire file
+    if(StringLen(SignalFilePath) == 0)
+        return;
+    
+    // FIXED: Do this in background to avoid blocking
+    static bool isUpdating = false;
+    if(isUpdating)
+        return;
+        
+    isUpdating = true;
+    
+    string filename = "telegram_signals.txt";
+    
+    // Read file
+    int fileHandle = FileOpen(filename, FILE_READ|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    if(fileHandle == INVALID_HANDLE)
+    {
+        isUpdating = false;
+        return;
+    }
+    
+    string fileContent = "";
+    while(!FileIsEnding(fileHandle))
+    {
+        string line = FileReadString(fileHandle);
+        if(!FileIsEnding(fileHandle) || StringLen(line) > 0)
+        {
+            // FIXED: Replace only the matching line
+            if(StringFind(line, originalLine) >= 0 && StringFind(line, "|NEW") > 0)
+            {
+                StringReplace(line, "|NEW", "|PROCESSED");
+                if(PrintToExpertLog)
+                    Print("📝 Marked signal as PROCESSED in file");
+            }
+            fileContent += line + "\n";
+        }
+    }
+    FileClose(fileHandle);
+    
+    // Write back
+    fileHandle = FileOpen(filename, FILE_WRITE|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    if(fileHandle != INVALID_HANDLE)
+    {
+        FileWriteString(fileHandle, fileContent);
+        FileClose(fileHandle);
+    }
+    
+    isUpdating = false;
+}
+
+
+//+------------------------------------------------------------------+
+//| Process formatted signal line (TIMESTAMP|CHANNEL|SYMBOL|...)    |
+//+------------------------------------------------------------------+
+// Update ProcessFormattedSignalLine to handle new format with ID
+// Replace the existing ProcessFormattedSignalLine function with this fixed version:
+bool ProcessFormattedSignalLine(string line)
+{
+    string parts[];
+    int partCount = StringSplit(line, '|', parts);
+    
+    // Expected format: TIMESTAMP|CHANNEL_ID|CHANNEL_NAME|DIRECTION|SYMBOL|ENTRY|SL|TP1|TP2|TP3|STATUS
+    if(partCount < 11)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Invalid signal format. Expected 11 parts, got: ", partCount, " | Line: ", line);
+        return false;
+    }
+    
+    // FIXED: Check signal status - only process NEW signals
+    string signalStatus = parts[10];
+    StringTrimLeft(signalStatus);
+    StringTrimRight(signalStatus);
+    
+    if(PrintToExpertLog)
+        Print("📊 Signal status: ", signalStatus);
+    
+    // Skip if not NEW
+    if(signalStatus != "NEW")
+    {
+        if(PrintToExpertLog)
+            Print("⏭️ Skipping signal with status: ", signalStatus);
+        return true; // Successfully processed (but skipped)
+    }
+    
+    TelegramSignal signal;
+    
+    // FIXED: Generate signal ID from channel + symbol + direction + timestamp (more unique)
+    string uniqueContent = parts[1] + "|" + parts[4] + "|" + parts[3] + "|" + parts[0];
+    signal.signalId = GenerateSignalId(uniqueContent);
+    signal.receivedTime = TimeCurrent();
+    
+    if(PrintToExpertLog)
+        Print("🆔 Generated signal ID: ", signal.signalId);
+    
+    // Parse timestamp
+    string timestampStr = parts[0];
+    StringTrimLeft(timestampStr);
+    StringTrimRight(timestampStr);
+    signal.signalTime = ParseTimestamp(timestampStr);
+    
+    // If timestamp parsing failed, use current time
+    if(signal.signalTime == 0)
+        signal.signalTime = TimeCurrent();
+    
+    // FIXED: Check signal age BEFORE checking if processed
+    long signalAgeMinutes = (TimeCurrent() - signal.signalTime) / 60;
+    
+    if(PrintToExpertLog)
+        Print("⏰ Signal age: ", (int)signalAgeMinutes, " minutes (Max allowed: ", MaxSignalAgeMinutes, ")");
+    
+    if(signalAgeMinutes > MaxSignalAgeMinutes)
+    {
+        if(PrintToExpertLog)
+            Print("⏰ Signal expired: ", (int)signalAgeMinutes, " minutes old (Max: ", MaxSignalAgeMinutes, ")");
+        
+        totalExpiredSignals++;
+        
+        // Mark as processed to avoid checking again
+        MarkSignalAsProcessedInFile(line);
+        return true; // Successfully processed (but expired)
+    }
+    
+    // FIXED: Check if already processed AFTER age check
+    if(IsSignalAlreadyProcessed(signal.signalId))
+    {
+        if(PrintToExpertLog)
+            Print("⏭️ Signal already processed: ", signal.signalId);
+        return true; // Already processed, skip
+    }
+    
+    if(PrintToExpertLog)
+        Print("🆕 Processing NEW signal: ", signal.signalId);
+    
+    // Parse remaining parts
+    signal.channelId = StringToInteger(parts[1]);
+    signal.channelName = parts[2];
+    signal.direction = parts[3];
+    signal.originalSymbol = parts[4];
+    signal.entryPrice = StringToDouble(parts[5]);
+    signal.stopLoss = StringToDouble(parts[6]);
+    signal.takeProfit1 = StringToDouble(parts[7]);
+    signal.takeProfit2 = StringToDouble(parts[8]);
+    signal.takeProfit3 = StringToDouble(parts[9]);
+    
+    signal.originalText = line;
+    signal.finalSymbol = ProcessSymbolTransformation(signal.originalSymbol);
+    signal.isExpired = false;
+    signal.isProcessed = false;
+    
+    if(PrintToExpertLog)
+    {
+        Print("📊 Parsed signal details:");
+        Print("   Channel: ", signal.channelName, " (", signal.channelId, ")");
+        Print("   Symbol: ", signal.originalSymbol, " → ", signal.finalSymbol);
+        Print("   Direction: ", signal.direction);
+        Print("   Entry: ", signal.entryPrice);
+        Print("   SL: ", signal.stopLoss);
+        Print("   TP1: ", signal.takeProfit1);
+        Print("   Age: ", (int)signalAgeMinutes, " minutes");
+    }
+    
+    // Validate stops before processing
+    if(!ValidateStopLevels(signal))
+    {
+        Print("❌ Invalid stop levels for ", signal.finalSymbol);
+        AddToProcessedSignals(signal.signalId);
+        MarkSignalAsProcessedInFile(line);
+        return true;
+    }
+    
+    // Validate and process signal
+    if(ValidateSignal(signal))
+    {
+        if(PrintToExpertLog)
+            Print("✅ Signal validation passed, executing trades...");
+            
+        ProcessValidatedSignal(signal);
+        AddToProcessedSignals(signal.signalId);
+        MarkSignalAsProcessedInFile(line);
+        
+        if(PrintToExpertLog)
+            Print("✅ Signal processing completed for: ", signal.signalId);
+    }
+    else
+    {
+        if(PrintToExpertLog)
+            Print("❌ Signal validation failed for: ", signal.finalSymbol);
+        AddToProcessedSignals(signal.signalId);
+        MarkSignalAsProcessedInFile(line);
+    }
+    
+    return true;
+}
+
+
+void MarkSignalAsProcessedInFile(string originalLine)
+{
+    // FIXED: Simple replacement without reading entire file
+    if(StringLen(SignalFilePath) == 0)
+        return;
+    
+    // FIXED: Do this in background to avoid blocking
+    static bool isUpdating = false;
+    if(isUpdating)
+        return;
+        
+    isUpdating = true;
+    
+    string filename = "telegram_signals.txt";
+    
+    // Read file
+    int fileHandle = FileOpen(filename, FILE_READ|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    if(fileHandle == INVALID_HANDLE)
+    {
+        isUpdating = false;
+        return;
+    }
+    
+    string fileContent = "";
+    while(!FileIsEnding(fileHandle))
+    {
+        string line = FileReadString(fileHandle);
+        if(!FileIsEnding(fileHandle) || StringLen(line) > 0)
+        {
+            // FIXED: Replace only the matching line
+            if(StringFind(line, originalLine) >= 0 && StringFind(line, "|NEW") > 0)
+            {
+                StringReplace(line, "|NEW", "|PROCESSED");
+                if(PrintToExpertLog)
+                    Print("📝 Marked signal as PROCESSED in file");
+            }
+            fileContent += line + "\n";
+        }
+    }
+    FileClose(fileHandle);
+    
+    // Write back
+    fileHandle = FileOpen(filename, FILE_WRITE|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    if(fileHandle != INVALID_HANDLE)
+    {
+        FileWriteString(fileHandle, fileContent);
+        FileClose(fileHandle);
+    }
+    
+    isUpdating = false;
+}
+
+
+bool ValidateStopLevels(TelegramSignal &signal)
+{
+    if(signal.stopLoss <= 0 || signal.takeProfit1 <= 0)
+        return true; // No stops to validate
+    
+    if(signal.direction == "BUY")
+    {
+        // For BUY: SL < current price < TP
+        if(signal.stopLoss >= signal.takeProfit1)
+        {
+            Print("❌ Invalid BUY stops: SL=", signal.stopLoss, " >= TP=", signal.takeProfit1);
+            return false;
+        }
+    }
+    else if(signal.direction == "SELL")
+    {
+        // For SELL: SL > current price > TP
+        if(signal.stopLoss <= signal.takeProfit1)
+        {
+            Print("❌ Invalid SELL stops: SL=", signal.stopLoss, " <= TP=", signal.takeProfit1);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+void UpdateSignalStatusInFile(string originalLine, string newStatus)
+{
+    // Queue the update instead of doing it immediately
+    static string pendingUpdates[];
+    static int pendingCount = 0;
+    
+    // Add to pending updates
+    if(pendingCount >= ArraySize(pendingUpdates))
+        ArrayResize(pendingUpdates, pendingCount + 100);
+        
+    pendingUpdates[pendingCount] = originalLine + "|||" + newStatus;
+    pendingCount++;
+    
+    // Process pending updates every 10 signals or every 5 seconds
+    static datetime lastBatchUpdate = 0;
+    if(pendingCount >= 10 || (pendingCount > 0 && TimeCurrent() - lastBatchUpdate >= 5))
+    {
+        ProcessPendingFileUpdates(pendingUpdates, pendingCount);
+        pendingCount = 0;
+        lastBatchUpdate = TimeCurrent();
+    }
+}
+
+void ProcessPendingFileUpdates(string &updates[], int count)
+{
+    if(count == 0) return;
+    
+    string fileName = SignalFilePath;
+    
+    // Try to read file
+    int readHandle = FileOpen(fileName, FILE_READ|FILE_SHARE_WRITE|FILE_TXT|FILE_ANSI);
+    if(readHandle == INVALID_HANDLE) return;
+    
+    string allLines[];
+    int lineCount = 0;
+    
+    while(!FileIsEnding(readHandle))
+    {
+        string line = FileReadString(readHandle);
+        ArrayResize(allLines, lineCount + 1);
+        allLines[lineCount] = line;
+        lineCount++;
+    }
+    FileClose(readHandle);
+    
+    // Update lines
+    for(int i = 0; i < count; i++)
+    {
+        string parts[];
+        if(StringSplit(updates[i], "|||", parts) == 2)
+        {
+            string originalLine = parts[0];
+            string newStatus = parts[1];
+            
+            for(int j = 0; j < lineCount; j++)
+            {
+                if(StringFind(allLines[j], originalLine) >= 0 && StringFind(allLines[j], "|NEW") >= 0)
+                {
+                    StringReplace(allLines[j], "|NEW", "|" + newStatus);
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Write back
+    int writeHandle = FileOpen(fileName, FILE_WRITE|FILE_SHARE_READ|FILE_TXT|FILE_ANSI);
+    if(writeHandle != INVALID_HANDLE)
+    {
+        for(int i = 0; i < lineCount; i++)
+        {
+            FileWriteString(writeHandle, allLines[i] + "\n");
+        }
+        FileClose(writeHandle);
+    }
+}
+
+
+void MarkSignalAsProcessed(string originalLine)
+{
+   // Optional: Mark signal as processed in the file
+   // For now, we rely on the signalId tracking which works well
+   
+   if(!PrintToExpertLog)
+      return;
+      
+   Print("📝 MT5 Signal processed and tracked by ID system");
+}
+//+------------------------------------------------------------------+
+//| Process text-based signal (legacy format)                       |
+//+------------------------------------------------------------------+
+void ProcessTextBasedSignal(string signalText)
+{
+   TelegramSignal signal;
+   
+   if(ParseSignalFromText(signalText, signal))
+   {
+      signal.signalId = GenerateSignalId(signalText);
+      signal.receivedTime = TimeCurrent();
+      
+      // For text-based signals, use current time if no timestamp found
+      if(signal.signalTime == 0)
+         signal.signalTime = TimeCurrent();
+      
+      // Check expiry
+      long signalAgeMinutes = (TimeCurrent() - signal.signalTime) / 60;
+      
+      if(signalAgeMinutes > MaxSignalAgeMinutes)
+      {
+         if(PrintToExpertLog)
+            Print("⏰ MT5 Text signal expired (", IntegerToString((int)signalAgeMinutes), " min old): ", signal.originalSymbol, " ", signal.direction);
+         
+         totalExpiredSignals++;
+         return;
+      }
+      
+      // Check if already processed
+      if(IsSignalAlreadyProcessed(signal.signalId))
+         return;
+      
+      // Validate and process
+      if(ValidateSignal(signal))
+      {
+         ProcessValidatedSignal(signal);
+         AddToProcessedSignals(signal.signalId);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Generate unique signal ID from content                          |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Generate unique signal ID - IMPROVED VERSION                    |
+//+------------------------------------------------------------------+
+string GenerateSignalId(string content)
+{
+    // Add timestamp and tick count for uniqueness
+    string uniqueContent = content + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + IntegerToString(GetTickCount());
+    
+    // Create a more robust hash
+    ulong hash1 = 5381;
+    ulong hash2 = 0;
+    
+    for(int i = 0; i < StringLen(uniqueContent); i++)
+    {
+        ushort c = StringGetCharacter(uniqueContent, i);
+        hash1 = ((hash1 << 5) + hash1) + c;
+        hash2 = hash2 * 31 + c;
+    }
+    
+    // Include microseconds for extra uniqueness
+    long mcs = GetMicrosecondCount();
+    
+    // Combine hashes
+    string finalHash = IntegerToString((int)(hash1 % 1000000)) + "_" + 
+                      IntegerToString((int)(hash2 % 1000000)) + "_" +
+                      IntegerToString((int)(mcs % 1000));
+    
+    return finalHash;
+}
+
+//+------------------------------------------------------------------+
+//| Parse timestamp from string                                     |
+//+------------------------------------------------------------------+
+datetime ParseTimestamp(string timestampStr)
+{
+    datetime result = 0;
+    
+    StringTrimLeft(timestampStr);
+    StringTrimRight(timestampStr);
+    
+    Print("🔍 Parsing timestamp: '", timestampStr, "'");
+    
+    // Try direct parsing first (handles yyyy.MM.dd HH:mm:ss format)
+    if(StringLen(timestampStr) >= 19)
+    {
+        result = StringToTime(timestampStr);
+        if(result > 0)
+        {
+            Print("✅ Direct parsing successful: ", timestampStr, " -> ", TimeToString(result, TIME_DATE|TIME_SECONDS));
+            return result;
+        }
+    }
+    
+    // Try ISO format conversion (yyyy-MM-dd HH:mm:ss -> yyyy.MM.dd HH:mm:ss)
+    string normalizedTime = timestampStr;
+    StringReplace(normalizedTime, "-", ".");
+    result = StringToTime(normalizedTime);
+    if(result > 0)
+    {
+        Print("✅ ISO format parsing successful: ", timestampStr, " -> ", TimeToString(result, TIME_DATE|TIME_SECONDS));
+        return result;
+    }
+    
+    // Handle Unix timestamp
+    long unixTime = StringToInteger(timestampStr);
+    if(unixTime > 1000000000 && unixTime < 2000000000)
+    {
+        result = (datetime)unixTime;
+        Print("✅ Unix timestamp parsing successful: ", timestampStr, " -> ", TimeToString(result, TIME_DATE|TIME_SECONDS));
+        return result;
+    }
+    
+    // If all failed, use current server time
+    Print("❌ Timestamp parsing failed for: '", timestampStr, "' - using current server time");
+    return TimeCurrent();
+}
+
+
+//+------------------------------------------------------------------+
+//| Check if signal was already processed                           |
+//+------------------------------------------------------------------+
+bool IsSignalAlreadyProcessed(string signalId)
+{
+    // Check in-memory array
+    for(int i = 0; i < processedSignalCount; i++)
+    {
+        if(processedSignalIds[i] == signalId)
+            return true;
+    }
+    
+    // Also check in the persistent file for safety
+    string filename = processedSignalIdsFile;
+    int fileHandle = FileOpen(filename, FILE_READ|FILE_TXT|FILE_ANSI);
+    if(fileHandle != INVALID_HANDLE)
+    {
+        while(!FileIsEnding(fileHandle))
+        {
+            string line = FileReadString(fileHandle);
+            if(StringFind(line, signalId) >= 0)
+            {
+                FileClose(fileHandle);
+                // Add to memory array for faster future checks
+                if(processedSignalCount < ArraySize(processedSignalIds))
+                {
+                    processedSignalIds[processedSignalCount] = signalId;
+                    processedSignalCount++;
+                }
+                return true;
+            }
+        }
+        FileClose(fileHandle);
+    }
+    
+    return false;
+}
+
+
+//+------------------------------------------------------------------+
+//| Add signal ID to processed list                                 |
+//+------------------------------------------------------------------+
+void AddToProcessedSignals(string signalId)
+{
+    // Check if already exists
+    for(int i = 0; i < processedSignalCount; i++)
+    {
+        if(processedSignalIds[i] == signalId)
+            return;
+    }
+    
+    // Resize array if needed
+    if(processedSignalCount >= ArraySize(processedSignalIds))
+    {
+        int newSize = ArraySize(processedSignalIds) + 1000;
+        if(ArrayResize(processedSignalIds, newSize) < 0)
+        {
+            Print("❌ Failed to resize processed signals array");
+            return;
+        }
+    }
+    
+    // Add to array
+    processedSignalIds[processedSignalCount] = signalId;
+    processedSignalCount++;
+    
+    // Save to file (non-blocking)
+    SaveProcessedSignalIdAsync(signalId);
+    
+    if(PrintToExpertLog && processedSignalCount % 100 == 0)
+        Print("📝 Processed signals count: ", processedSignalCount);
+}void SaveProcessedSignalIdAsync(string signalId)
+{
+    // Use a separate file for processed IDs to avoid conflicts
+    static string queuedIds[];
+    static int queuedCount = 0;
+    static datetime lastSave = 0;
+    
+    // Add to queue
+    if(queuedCount >= ArraySize(queuedIds))
+        ArrayResize(queuedIds, queuedCount + 100);
+        
+    queuedIds[queuedCount] = signalId + "|" + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES);
+    queuedCount++;
+    
+    // Save batch every 10 IDs or every 5 seconds
+    if(queuedCount >= 10 || (queuedCount > 0 && TimeCurrent() - lastSave >= 5))
+    {
+        // Write to file
+        int fileHandle = FileOpen(processedSignalIdsFile, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI);
+        if(fileHandle != INVALID_HANDLE)
+        {
+            // Move to end of file
+            FileSeek(fileHandle, 0, SEEK_END);
+            
+            // Write queued IDs
+            for(int i = 0; i < queuedCount; i++)
+            {
+                FileWriteString(fileHandle, queuedIds[i] + "\n");
+            }
+            
+            FileClose(fileHandle);
+        }
+        
+        // Reset queue
+        queuedCount = 0;
+        lastSave = TimeCurrent();
+    }
+}
+//+------------------------------------------------------------------+
+//| Clean up old processed signal IDs                               |
+//+------------------------------------------------------------------+
+void CleanupOldProcessedSignals()
+{
+    // Only cleanup if we have too many signals
+    if(processedSignalCount < 5000)
+        return;
+        
+    // Create new array with recent signals only
+    string tempArray[];
+    int tempCount = 0;
+    int keepCount = 2000;  // Keep last 2000 signals
+    
+    // Calculate starting index
+    int startIndex = processedSignalCount - keepCount;
+    if(startIndex < 0) startIndex = 0;
+    
+    // Copy recent signals to temp array
+    ArrayResize(tempArray, keepCount);
+    for(int i = startIndex; i < processedSignalCount; i++)
+    {
+        tempArray[tempCount] = processedSignalIds[i];
+        tempCount++;
+    }
+    
+    // Replace old array with temp array
+    ArrayResize(processedSignalIds, keepCount + 1000);  // Add buffer
+    for(int i = 0; i < tempCount; i++)
+    {
+        processedSignalIds[i] = tempArray[i];
+    }
+    processedSignalCount = tempCount;
+    
+    if(PrintToExpertLog)
+        Print("🧹 Cleaned up processed signals. Kept last ", tempCount, " entries");
+        
+}
+// Load processed IDs on startup
+void LoadProcessedSignalIds()
+{
+    int fileHandle = FileOpen(processedSignalIdsFile, FILE_READ|FILE_TXT|FILE_ANSI);
+    if(fileHandle == INVALID_HANDLE) return;
+    
+    processedSignalCount = 0;
+    ArrayResize(processedSignalIds, 1000); // Initial size
+    
+    while(!FileIsEnding(fileHandle) && processedSignalCount < maxProcessedSignals)
+    {
+        string line = FileReadString(fileHandle);
+        if(StringLen(line) > 0)
+        {
+            string parts[];
+            if(StringSplit(line, '|', parts) > 0)
+            {
+                if(processedSignalCount >= ArraySize(processedSignalIds))
+                {
+                    ArrayResize(processedSignalIds, processedSignalCount + 1000);
+                }
+                processedSignalIds[processedSignalCount] = parts[0];
+                processedSignalCount++;
+            }
+        }
+    }
+    
+    FileClose(fileHandle);
+    
+    if(PrintToExpertLog)
+        Print("📋 Loaded ", processedSignalCount, " processed signal IDs from history");
+}
+
+//+------------------------------------------------------------------+
+//| Validate signal before processing                               |
+//+------------------------------------------------------------------+
+bool ValidateSignal(TelegramSignal &signal)
+{
+    if(PrintToExpertLog)
+    {
+        Print("🔍 VALIDATING SIGNAL:");
+        Print("   Original Symbol: ", signal.originalSymbol);
+        Print("   Final Symbol: ", signal.finalSymbol);
+        Print("   Direction: ", signal.direction);
+        Print("   Order Type: ", signal.orderType);
+        Print("   Channel ID: ", signal.channelId);
+    }
+    
+    // Basic validation
+    if(StringLen(signal.originalSymbol) == 0)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Validation failed: Missing symbol");
+        return false;
+    }
+    
+    if(StringLen(signal.direction) == 0)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Validation failed: Missing direction");
+        return false;
+    }
+    
+    if(signal.direction != "BUY" && signal.direction != "SELL")
+    {
+        if(PrintToExpertLog)
+            Print("❌ Validation failed: Invalid direction: ", signal.direction);
+        return false;
+    }
+    
+    // Validate order type
+    if(signal.orderType != "MARKET" && signal.orderType != "LIMIT" && signal.orderType != "STOP")
+    {
+        if(PrintToExpertLog)
+            Print("⚠️ Invalid order type: ", signal.orderType, " - defaulting to MARKET");
+        signal.orderType = "MARKET";
+    }
+    
+    // For pending orders, entry price is required
+    if(signal.orderType != "MARKET" && signal.entryPrice <= 0)
+    {
+        if(PrintToExpertLog)
+            Print("⚠️ Pending order without entry price - converting to MARKET");
+        signal.orderType = "MARKET";
+    }
+    
+    if(StringLen(signal.finalSymbol) == 0)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Validation failed: Symbol excluded by filters");
+        totalSymbolsFiltered++;
+        return false;
+    }
+    
+    // FIXED: Channel validation with test channel support
+    if(StringLen(ChannelIDs) > 0)
+    {
+        string channelIdStr = signal.channelId;
+        
+        // Allow test channel 999999
+        if(signal.channelId == "999999")
+        {
+            if(PrintToExpertLog)
+                Print("✅ Test channel detected (999999) - signal allowed");
+        }
+        else if(!IsChannelMonitored(channelIdStr))
+        {
+            if(PrintToExpertLog)
+            {
+                Print("❌ Validation failed: Channel not monitored");
+                Print("   Channel ID: ", signal.channelId);
+                Print("   Monitored channels: ", ChannelIDs);
+                Print("   💡 Add channel ID to ChannelIDs parameter or use test channel 999999");
+            }
+            return false;
+        }
+    }
+    else
+    {
+        if(PrintToExpertLog)
+            Print("⚠️ No channel filter set - accepting all channels");
+    }
+    
+    // Price level validation
+    if(signal.stopLoss <= 0 && IgnoreTradesWithoutSL)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Validation failed: No stop loss and IgnoreTradesWithoutSL = true");
+        return false;
+    }
+    
+    if(signal.takeProfit1 <= 0 && IgnoreTradesWithoutTP)
+    {
+        if(PrintToExpertLog)
+            Print("❌ Validation failed: No take profit and IgnoreTradesWithoutTP = true");
+        return false;
+    }
+    
+    if(PrintToExpertLog)
+        Print("✅ SIGNAL VALIDATION SUCCESSFUL");
+    
+    return true;
+}
+
+void LogFileError(string operation, string filename, int errorCode)
+{
+   Print("❌ MT5 File operation failed:");
+   Print("   • Operation: ", operation);
+   Print("   • File: ", filename);
+   Print("   • Error Code: ", errorCode);
+   Print("   • Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+   
+   switch(errorCode)
+   {
+      case 4103: // ERR_CANNOT_OPEN_FILE equivalent in MT5
+         Print("💡 Solution: Check if file exists and has correct permissions");
+         break;
+      case 4104: // ERR_FILE_NOT_FOUND equivalent in MT5  
+         Print("💡 Solution: Ensure Windows app is writing to correct MT5 Files folder");
+         break;
+      case 4106: // ERR_INVALID_FUNCTION_PARAMETER equivalent in MT5
+         Print("💡 Solution: Check file path and name format");
+         break;
+      default:
+         Print("💡 Check MT5 terminal logs for more details");
+         break;
+   }
+}
+bool CheckSymbolTradingAllowed(string symbol)
+{
+   // Check if symbol is available and trading is allowed
+   if(!SymbolSelect(symbol, true))
+   {
+      Print("❌ MT5 Symbol not available: ", symbol);
+      return false;
+   }
+   
+   // Get symbol trading mode
+   ENUM_SYMBOL_TRADE_MODE tradeMode = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+   
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED)
+   {
+      Print("⚠️ MT5 Trading disabled for symbol: ", symbol);
+      return false;
+   }
+   
+   // Check if market is open
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   
+   if(bid == 0 || ask == 0)
+   {
+      Print("⚠️ MT5 Market closed for symbol: ", symbol);
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Process validated signal                                        |
+//+------------------------------------------------------------------+
+void ProcessValidatedSignal(TelegramSignal &signal)
+{
+   totalSignalsProcessed++;
+   
+   long signalAgeMinutes = (TimeCurrent() - signal.signalTime) / 60;
+   
+   if(PrintToExpertLog)
+   {
+      Print("🚀 MT5 Processing FRESH Signal #", totalSignalsProcessed, ":");
+      Print("   📊 Signal: ", signal.originalSymbol, " (", signal.finalSymbol, ") ", signal.direction);
+      Print("   📋 Order Type: ", signal.orderType);
+      Print("   ⏰ Age: ", IntegerToString((int)signalAgeMinutes), " minutes (Max: ", MaxSignalAgeMinutes, ")");
+      Print("   📢 Channel: ", signal.channelName, " [", signal.channelId, "]");
+      Print("   🕐 Signal Time: ", TimeToString(signal.signalTime, TIME_DATE|TIME_MINUTES));
+      Print("   💰 Entry: ", (signal.entryPrice > 0 ? DoubleToString(signal.entryPrice, 5) : "Market"));
+      Print("   🛑 SL: ", (signal.stopLoss > 0 ? DoubleToString(signal.stopLoss, 5) : "None"));
+      Print("   🎯 TP1: ", (signal.takeProfit1 > 0 ? DoubleToString(signal.takeProfit1, 5) : "None"));
+      Print("   👤 User: islamahmed9717 | Current UTC: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+   }
+   
+   // Validate symbol exists with MT5 broker
+   if(!SymbolSelect(signal.finalSymbol, true))
+   {
+      Print("❌ MT5 Symbol not available with broker: ", signal.finalSymbol, " (original: ", signal.originalSymbol, ")");
+      SuggestSimilarSymbols(signal.finalSymbol);
+      return;
+   }
+   
+   // Get symbol info and check trading conditions
+   if(!symbolInfo.Name(signal.finalSymbol))
+   {
+      Print("❌ MT5 Cannot get symbol info for: ", signal.finalSymbol);
+      return;
+   }
+   
+   symbolInfo.RefreshRates();
+   
+   // Check if market is open for this symbol
+   if(!CheckSymbolTradingAllowed(signal.finalSymbol))
+   {
+      Print("⚠️ MT5 Trading not allowed for symbol: ", signal.finalSymbol);
+      return;
+   }
+   
+   // Check spread
+   double currentSpread = symbolInfo.Spread() * symbolInfo.Point();
+   double maxAllowedSpread = MaxSpreadPips * symbolInfo.Point();
+   
+   if(MaxSpreadPips > 0 && currentSpread > maxAllowedSpread)
+   {
+      Print("⚠️ MT5 Spread too high for ", signal.finalSymbol, ": ", 
+            DoubleToString(currentSpread / symbolInfo.Point(), 1), " pips (max: ", MaxSpreadPips, ")");
+      return;
+   }
+   
+   // Execute the signal
+   ExecuteTelegramSignal(signal);
+   signal.isProcessed = true;
+}
+
+
+//+------------------------------------------------------------------+
+//| Parse signal from text content                                  |
+//+------------------------------------------------------------------+
+bool ParseSignalFromText(string signalText, TelegramSignal &signal)
+{
+   // Initialize signal structure
+   signal.originalSymbol = "";
+   signal.finalSymbol = "";
+   signal.direction = "";
+   signal.entryPrice = 0;
+   signal.stopLoss = 0;
+   signal.takeProfit1 = 0;
+   signal.takeProfit2 = 0;
+   signal.takeProfit3 = 0;
+   signal.signalTime = TimeCurrent();
+   signal.channelId = "";
+   signal.channelName = "";
+   signal.originalText = signalText;
+   
+   string lines[];
+   int lineCount = StringSplit(signalText, '\n', lines);
+   
+   for(int i = 0; i < lineCount; i++)
+   {
+      string line = lines[i];
+      StringTrimLeft(line);
+      StringTrimRight(line);
+      
+      string upperLine = line;
+      StringToUpper(upperLine);
+      
+      // Extract channel information
+      if(StringFind(upperLine, "CHANNEL:") >= 0)
+      {
+         if(StringFind(line, "[") >= 0 && StringFind(line, "]") >= 0)
+         {
+            int startPos = StringFind(line, "[") + 1;
+            int endPos = StringFind(line, "]");
+            if(endPos > startPos)
+            {
+               signal.channelId = StringSubstr(line, startPos, endPos - startPos);
+            }
+         }
+         
+         // Extract channel name
+         int colonPos = StringFind(line, ":");
+         if(colonPos >= 0)
+         {
+            string afterColon = StringSubstr(line, colonPos + 1);
+            int bracketPos = StringFind(afterColon, "[");
+            if(bracketPos >= 0)
+            {
+               signal.channelName = StringSubstr(afterColon, 0, bracketPos);
+               StringTrimLeft(signal.channelName);
+               StringTrimRight(signal.channelName);
+            }
+         }
+      }
+      
+      // Parse trading direction and symbol
+      if(StringFind(upperLine, "BUY") >= 0 || StringFind(upperLine, "SELL") >= 0)
+      {
+         if(StringFind(upperLine, "BUY") >= 0)
+         {
+            signal.direction = "BUY";
+            signal.originalSymbol = ExtractSymbolAfterKeyword(line, "BUY");
+         }
+         else
+         {
+            signal.direction = "SELL";
+            signal.originalSymbol = ExtractSymbolAfterKeyword(line, "SELL");
+         }
+         
+         // Apply symbol transformation
+         signal.finalSymbol = ProcessSymbolTransformation(signal.originalSymbol);
+      }
+      
+      // Parse Stop Loss
+      if(StringFind(upperLine, "SL") >= 0)
+      {
+         signal.stopLoss = ExtractPriceFromLine(line, "SL");
+      }
+      
+      // Parse Take Profits
+      if(StringFind(upperLine, "TP") >= 0)
+      {
+         double tpPrice = ExtractPriceFromLine(line, "TP");
+         if(tpPrice > 0)
+         {
+            if(signal.takeProfit1 == 0)
+               signal.takeProfit1 = tpPrice;
+            else if(signal.takeProfit2 == 0)
+               signal.takeProfit2 = tpPrice;
+            else if(signal.takeProfit3 == 0)
+               signal.takeProfit3 = tpPrice;
+         }
+      }
+      
+      // Parse TP2, TP3 specifically
+      if(StringFind(upperLine, "TP2") >= 0)
+      {
+         signal.takeProfit2 = ExtractPriceFromLine(line, "TP2");
+      }
+      if(StringFind(upperLine, "TP3") >= 0)
+      {
+         signal.takeProfit3 = ExtractPriceFromLine(line, "TP3");
+      }
+   }
+   
+   // Validate signal
+   bool isValid = (StringLen(signal.originalSymbol) > 0 && 
+                   StringLen(signal.direction) > 0 && 
+                   StringLen(signal.finalSymbol) > 0);
+   
+   if(isValid && PrintToExpertLog)
+   {
+      Print("📊 MT5 Parsed Signal: ", signal.originalSymbol, " (", signal.finalSymbol, ") ", signal.direction,
+            " | SL: ", DoubleToString(signal.stopLoss, 5), " | TP1: ", DoubleToString(signal.takeProfit1, 5));
+   }
+   
+   return isValid;
+}
+
+//+------------------------------------------------------------------+
+//| Process complete symbol transformation                           |
+//+------------------------------------------------------------------+
+string ProcessSymbolTransformation(string originalSymbol)
+{
+   if(PrintToExpertLog)
+      Print("🔄 MT5 Processing symbol transformation: ", originalSymbol);
+   
+   // Step 1: Apply symbol mapping
+   string mappedSymbol = ApplySymbolMapping(originalSymbol);
+   
+   // Step 2: Apply prefix/suffix
+   string finalSymbol = ApplyPrefixSuffix(mappedSymbol);
+   
+   // Step 3: Check exclusions
+   if(IsSymbolExcluded(finalSymbol) || IsSymbolExcluded(originalSymbol))
+   {
+      if(PrintToExpertLog)
+         Print("🚫 MT5 Symbol excluded: ", originalSymbol, " → ", finalSymbol);
+      totalSymbolsFiltered++;
+      return ""; // Return empty to indicate exclusion
+   }
+   
+   // Step 4: Check whitelist
+   if(!IsSymbolAllowed(finalSymbol) && !IsSymbolAllowed(originalSymbol))
+   {
+      if(PrintToExpertLog)
+         Print("⚠️ MT5 Symbol not in whitelist: ", originalSymbol, " → ", finalSymbol);
+      totalSymbolsFiltered++;
+      return ""; // Return empty to indicate not allowed
+   }
+   
+   if(PrintToExpertLog && finalSymbol != originalSymbol)
+      Print("✅ MT5 Symbol transformed: ", originalSymbol, " → ", finalSymbol);
+   
+   return finalSymbol;
+}
+
+//+------------------------------------------------------------------+
+//| Apply symbol mapping                                            |
+//+------------------------------------------------------------------+
+string ApplySymbolMapping(string symbol)
+{
+   string upperSymbol = symbol;
+   StringToUpper(upperSymbol);
+   
+   for(int i = 0; i < symbolMappingCount; i++)
+   {
+      string fromSymbol = symbolMappings[i][0];
+      StringToUpper(fromSymbol);
+      
+      if(fromSymbol == upperSymbol)
+      {
+         if(PrintToExpertLog)
+            Print("🗺️ MT5 Symbol mapped: ", symbol, " → ", symbolMappings[i][1]);
+         return symbolMappings[i][1];
+      }
+   }
+   
+   return symbol; // No mapping found
+}
+
+//+------------------------------------------------------------------+
+//| Apply prefix and suffix                                         |
+//+------------------------------------------------------------------+
+string ApplyPrefixSuffix(string symbol)
+{
+   string upperSymbol = symbol;
+   StringToUpper(upperSymbol);
+   
+   // Check if should skip prefix/suffix
+   for(int i = 0; i < skipPrefixSuffixCount; i++)
+   {
+      if(skipPrefixSuffixList[i] == upperSymbol)
+      {
+         if(PrintToExpertLog)
+            Print("⏭️ MT5 Skipping prefix/suffix for: ", symbol);
+         return symbol;
+      }
+   }
+   
+   // Apply prefix and suffix
+   string result = SymbolPrefix + symbol + SymbolSuffix;
+   
+   if(PrintToExpertLog && (StringLen(SymbolPrefix) > 0 || StringLen(SymbolSuffix) > 0))
+      Print("🔧 MT5 Applied prefix/suffix: ", symbol, " → ", result);
+   
+   return result;
+}
+
+//+------------------------------------------------------------------+
+//| Check if symbol is excluded                                     |
+//+------------------------------------------------------------------+
+bool IsSymbolExcluded(string symbol)
+{
+   if(excludedSymbolsCount == 0)
+      return false;
+   
+   string upperSymbol = symbol;
+   StringToUpper(upperSymbol);
+   
+   for(int i = 0; i < excludedSymbolsCount; i++)
+   {
+      if(excludedSymbolsList[i] == upperSymbol)
+         return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if symbol is allowed (whitelist)                          |
+//+------------------------------------------------------------------+
+bool IsSymbolAllowed(string symbol)
+{
+   if(allowedSymbolsCount == 0)
+      return true; // No whitelist means all allowed
+   
+   string upperSymbol = symbol;
+   StringToUpper(upperSymbol);
+   
+   for(int i = 0; i < allowedSymbolsCount; i++)
+   {
+      if(allowedSymbolsList[i] == upperSymbol)
+         return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Extract symbol after keyword                                    |
+//+------------------------------------------------------------------+
+string ExtractSymbolAfterKeyword(string line, string keyword)
+{
+   string upperLine = line;
+   StringToUpper(upperLine);
+   
+   int keywordPos = StringFind(upperLine, keyword);
+   if(keywordPos < 0)
+      return "";
+   
+   string afterKeyword = StringSubstr(line, keywordPos + StringLen(keyword));
+   StringTrimLeft(afterKeyword);
+   StringTrimRight(afterKeyword);
+   
+   // Remove common words
+   StringReplace(afterKeyword, "NOW", "");
+   StringReplace(afterKeyword, "SIGNAL", "");
+   StringTrimLeft(afterKeyword);
+   StringTrimRight(afterKeyword);
+   
+   // Get first word as symbol
+   string words[];
+   int wordCount = StringSplit(afterKeyword, ' ', words);
+   
+   if(wordCount > 0)
+   {
+      string symbol = words[0];
+      StringTrimLeft(symbol);
+      StringTrimRight(symbol);
+      
+      // Clean symbol - keep only alphanumeric
+      string cleanSymbol = "";
+      for(int i = 0; i < StringLen(symbol); i++)
+      {
+         ushort ch = StringGetCharacter(symbol, i);
+         if((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+         {
+            cleanSymbol += CharToString(ch);
+         }
+      }
+      return cleanSymbol;
+   }
+   
+   return "";
+}
+
+//+------------------------------------------------------------------+
+//| Extract price from line                                         |
+//+------------------------------------------------------------------+
+double ExtractPriceFromLine(string line, string keyword)
+{
+   string upperLine = line;
+   StringToUpper(upperLine);
+   
+   int keywordPos = StringFind(upperLine, keyword);
+   if(keywordPos < 0)
+      return 0;
+   
+   string afterKeyword = StringSubstr(line, keywordPos + StringLen(keyword));
+   StringTrimLeft(afterKeyword);
+   StringTrimRight(afterKeyword);
+   
+   // Remove separators
+   StringReplace(afterKeyword, ":", "");
+   StringReplace(afterKeyword, "=", "");
+   StringReplace(afterKeyword, "@", "");
+   StringTrimLeft(afterKeyword);
+   StringTrimRight(afterKeyword);
+   
+   // Extract number
+   string numberStr = "";
+   for(int i = 0; i < StringLen(afterKeyword); i++)
+   {
+      ushort ch = StringGetCharacter(afterKeyword, i);
+      if((ch >= '0' && ch <= '9') || ch == '.')
+      {
+         numberStr += CharToString(ch);
+      }
+      else if(StringLen(numberStr) > 0)
+      {
+         break; // Stop at first non-numeric after we started collecting
+      }
+   }
+   
+   return StringToDouble(numberStr);
+}
+
+//+------------------------------------------------------------------+
+//| Check if channel is monitored                                   |
+//+------------------------------------------------------------------+
+bool IsChannelMonitored(string channelId)
+{
+   if(StringLen(ChannelIDs) == 0 || StringLen(channelId) == 0)
+      return false;
+   
+   string channels[];
+   int channelCount = StringSplit(ChannelIDs, ',', channels);
+   
+   for(int i = 0; i < channelCount; i++)
+   {
+      string monitoredChannel = channels[i];
+      StringTrimLeft(monitoredChannel);
+      StringTrimRight(monitoredChannel);
+      if(monitoredChannel == channelId)
+         return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Suggest similar symbols when exact symbol not found - MT5       |
+//+------------------------------------------------------------------+
+void SuggestSimilarSymbols(string targetSymbol)
+{
+   Print("🔍 MT5 Searching for similar symbols to: ", targetSymbol);
+   
+   string upperTarget = targetSymbol;
+   StringToUpper(upperTarget);
+   
+   // Remove prefix/suffix to get core symbol
+   string coreSymbol = upperTarget;
+   if(StringLen(SymbolPrefix) > 0)
+   {
+      string upperPrefix = SymbolPrefix;
+      StringToUpper(upperPrefix);
+      StringReplace(coreSymbol, upperPrefix, "");
+   }
+   if(StringLen(SymbolSuffix) > 0)
+   {
+      string upperSuffix = SymbolSuffix;
+      StringToUpper(upperSuffix);
+      StringReplace(coreSymbol, upperSuffix, "");
+   }
+   
+   int totalSymbols = SymbolsTotal(true);
+   string suggestions = "";
+   int suggestionCount = 0;
+   
+   for(int i = 0; i < totalSymbols && suggestionCount < 5; i++)
+   {
+      string symbolName = SymbolName(i, true);
+      string upperSymbolName = symbolName;
+      StringToUpper(upperSymbolName);
+      
+      // Check if contains core symbol or target symbol
+      if(StringFind(upperSymbolName, coreSymbol) >= 0 || StringFind(upperSymbolName, upperTarget) >= 0)
+      {
+         if(suggestionCount > 0)
+            suggestions += ", ";
+         suggestions += symbolName;
+         suggestionCount++;
+      }
+   }
+   
+   if(suggestionCount > 0)
+   {
+      Print("💡 MT5 Similar symbols found: ", suggestions);
+      Print("💡 Consider updating symbol mapping: ", targetSymbol, ":ACTUAL_BROKER_SYMBOL");
+      Print("💡 Or check your broker's symbol list in Market Watch");
+   }
+   else
+   {
+      Print("💡 MT5 No similar symbols found. Available symbols: ", totalSymbols);
+      Print("💡 Check if symbol is available in your broker's Market Watch");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Execute Telegram signal - MT5 VERSION                           |
+//+------------------------------------------------------------------+
+void ExecuteTelegramSignal(TelegramSignal &signal)
+{
+    // Override order type if ForceMarketExecution is enabled
+    if(ForceMarketExecution)
+    {
+        signal.orderType = "MARKET";
+        if(PrintToExpertLog)
+            Print("⚠️ ForceMarketExecution enabled - overriding order type to MARKET");
+    }
+    
+    ENUM_ORDER_TYPE orderType = (signal.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    
+    // Calculate lot sizes for multiple TPs
+    double lots[3];
+    CalculateLotSizes(signal, lots);
+    
+    if(PrintToExpertLog)
+    {
+        Print("📈 MT5 Executing ", signal.orderType, " signal with lot distribution:");
+        Print("   • TP1: ", DoubleToString(lots[0], 2), " lots");
+        if(signal.takeProfit2 > 0)
+            Print("   • TP2: ", DoubleToString(lots[1], 2), " lots");
+        if(signal.takeProfit3 > 0)
+            Print("   • TP3: ", DoubleToString(lots[2], 2), " lots");
+    }
+    
+    // Execute TP1 (primary trade)
+    if(lots[0] > 0)
+    {
+        ExecuteEnhancedTrade(signal, orderType, lots[0], signal.stopLoss, signal.takeProfit1, "TP1");
+    }
+    
+    // Execute TP2 if available
+    if(signal.takeProfit2 > 0 && lots[1] > 0)
+    {
+        ExecuteEnhancedTrade(signal, orderType, lots[1], signal.stopLoss, signal.takeProfit2, "TP2");
+    }
+    
+    // Execute TP3 if available
+    if(signal.takeProfit3 > 0 && lots[2] > 0)
+    {
+        ExecuteEnhancedTrade(signal, orderType, lots[2], signal.stopLoss, signal.takeProfit3, "TP3");
+    }
+}
+
+void ExecuteEnhancedTrade(TelegramSignal &signal, ENUM_ORDER_TYPE baseOrderType, double lots, double sl, double tp, string tpLevel)
+{
+    string symbol = signal.finalSymbol;
+    string comment = CommentPrefix + "_" + signal.originalSymbol + "_" + tpLevel + "_" + signal.orderType + "_islamahmed9717";
+    
+    // Setup MT5 symbol info
+    if(!symbolInfo.Name(symbol))
+    {
+        Print("❌ MT5 Cannot get symbol info for: ", symbol);
+        return;
+    }
+    
+    // Get current prices
+    symbolInfo.RefreshRates();
+    double currentBid = symbolInfo.Bid();
+    double currentAsk = symbolInfo.Ask();
+    double currentPrice = (baseOrderType == ORDER_TYPE_BUY) ? currentAsk : currentBid;
+    
+    // Determine actual order type based on signal
+    ENUM_ORDER_TYPE actualOrderType = DetermineOrderType(signal, baseOrderType, currentPrice);
+    
+    // Calculate minimum distance for pending orders
+    int stopLevel = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minDistance = MathMax(MinDistanceForPendingPips * symbolInfo.Point(), stopLevel * symbolInfo.Point());
+    
+    // Validate entry price for pending orders
+    if(signal.orderType != "MARKET" && signal.entryPrice > 0)
+    {
+        double priceDistance = MathAbs(currentPrice - signal.entryPrice);
+        
+        if(priceDistance < minDistance)
+        {
+            if(PrintToExpertLog)
+            {
+                Print("⚠️ Entry price too close to market. Required minimum: ", 
+                      DoubleToString(minDistance / symbolInfo.Point(), 1), " pips");
+                Print("   Converting to MARKET order");
+            }
+            
+            actualOrderType = (signal.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+            signal.orderType = "MARKET";
+        }
+    }
+    
+    // Normalize prices
+    double entryPrice = (signal.entryPrice > 0) ? symbolInfo.NormalizePrice(signal.entryPrice) : 0;
+    double normalizedSL = (sl > 0) ? symbolInfo.NormalizePrice(sl) : 0;
+    double normalizedTP = (tp > 0) ? symbolInfo.NormalizePrice(tp) : 0;
+    
+    // Normalize lot size
+    double lotStep = symbolInfo.LotsStep();
+    double normalizedLots = (lotStep > 0) ? NormalizeDouble(MathRound(lots / lotStep) * lotStep, 2) : lots;
+    
+    if(PrintToExpertLog)
+    {
+        Print("🎯 Executing ", GetOrderTypeName(actualOrderType), " order:");
+        Print("   • Symbol: ", symbol);
+        Print("   • Lots: ", DoubleToString(normalizedLots, 2));
+        Print("   • Type: ", signal.orderType);
+        Print("   • Entry: ", DoubleToString(entryPrice, symbolInfo.Digits()));
+        Print("   • SL: ", DoubleToString(normalizedSL, symbolInfo.Digits()));
+        Print("   • TP: ", DoubleToString(normalizedTP, symbolInfo.Digits()));
+    }
+    
+    // Execute the trade
+    bool result = false;
+    ulong ticket = 0;
+    
+    switch(actualOrderType)
+    {
+        case ORDER_TYPE_BUY:
+            result = trade.Buy(normalizedLots, symbol, 0, normalizedSL, normalizedTP, comment);
+            break;
+            
+        case ORDER_TYPE_SELL:
+            result = trade.Sell(normalizedLots, symbol, 0, normalizedSL, normalizedTP, comment);
+            break;
+            
+        case ORDER_TYPE_BUY_LIMIT:
+            {
+                datetime expiration = 0;
+                if(PendingOrderExpirationHours > 0)
+                    expiration = TimeCurrent() + PendingOrderExpirationHours * 3600;
+                    
+                result = trade.BuyLimit(normalizedLots, entryPrice, symbol, normalizedSL, normalizedTP, 
+                                       ORDER_TIME_GTC, expiration, comment);
+            }
+            break;
+            
+        case ORDER_TYPE_SELL_LIMIT:
+            {
+                datetime expiration = 0;
+                if(PendingOrderExpirationHours > 0)
+                    expiration = TimeCurrent() + PendingOrderExpirationHours * 3600;
+                    
+                result = trade.SellLimit(normalizedLots, entryPrice, symbol, normalizedSL, normalizedTP, 
+                                        ORDER_TIME_GTC, expiration, comment);
+            }
+            break;
+            
+        case ORDER_TYPE_BUY_STOP:
+            {
+                datetime expiration = 0;
+                if(PendingOrderExpirationHours > 0)
+                    expiration = TimeCurrent() + PendingOrderExpirationHours * 3600;
+                    
+                result = trade.BuyStop(normalizedLots, entryPrice, symbol, normalizedSL, normalizedTP, 
+                                      ORDER_TIME_GTC, expiration, comment);
+            }
+            break;
+            
+        case ORDER_TYPE_SELL_STOP:
+            {
+                datetime expiration = 0;
+                if(PendingOrderExpirationHours > 0)
+                    expiration = TimeCurrent() + PendingOrderExpirationHours * 3600;
+                    
+                result = trade.SellStop(normalizedLots, entryPrice, symbol, normalizedSL, normalizedTP, 
+                                       ORDER_TIME_GTC, expiration, comment);
+            }
+            break;
+    }
+    
+    if(result)
+    {
+        ticket = trade.ResultOrder();
+        
+        if(IsMarketOrder(actualOrderType))
+        {
+            totalTradesExecuted++;
+            AddToTrackingArray(ticket, symbol, actualOrderType, normalizedLots, 
+                             trade.ResultPrice(), normalizedSL, normalizedTP, signal.originalSymbol);
+        }
+        else
+        {
+            AddToPendingOrdersArray(ticket, symbol, actualOrderType, normalizedLots, 
+                                  entryPrice, normalizedSL, normalizedTP, signal);
+        }
+        
+        string message = StringFormat("✅ %s %s %s %.2f lots @ %.5f | %s | SL: %.5f | TP: %.5f | #%I64u", 
+                                    GetOrderTypeName(actualOrderType), signal.originalSymbol, symbol, 
+                                    normalizedLots, entryPrice > 0 ? entryPrice : trade.ResultPrice(), 
+                                    tpLevel, normalizedSL, normalizedTP, ticket);
+        
+        if(SendMT5Alerts)
+            Alert(message);
+        
+        if(SendPushNotifications)
+            SendNotification(message);
+        
+        if(PrintToExpertLog)
+        {
+            Print("✅ ORDER PLACED SUCCESSFULLY!");
+            Print("   🎫 Ticket: #", ticket);
+            Print("   📊 ", message);
+        }
+    }
+    else
+    {
+        uint errorCode = trade.ResultRetcode();
+        string errorDesc = trade.ResultRetcodeDescription();
+        Print("❌ Trade failed: ", errorDesc, " (", errorCode, ")");
+    }
+}
+
+string GetOrderTypeName(ENUM_ORDER_TYPE orderType)
+{
+    switch(orderType)
+    {
+        case ORDER_TYPE_BUY: return "BUY";
+        case ORDER_TYPE_SELL: return "SELL";
+        case ORDER_TYPE_BUY_LIMIT: return "BUY LIMIT";
+        case ORDER_TYPE_SELL_LIMIT: return "SELL LIMIT";
+        case ORDER_TYPE_BUY_STOP: return "BUY STOP";
+        case ORDER_TYPE_SELL_STOP: return "SELL STOP";
+        default: return "UNKNOWN";
+    }
+}
+
+bool IsMarketOrder(ENUM_ORDER_TYPE orderType)
+{
+    return (orderType == ORDER_TYPE_BUY || orderType == ORDER_TYPE_SELL);
+}
+
+
+ENUM_ORDER_TYPE DetermineOrderType(TelegramSignal &signal, ENUM_ORDER_TYPE baseOrderType, double currentPrice)
+{
+    // If no entry price or MARKET type, return base order type
+    if(signal.entryPrice <= 0 || signal.orderType == "MARKET")
+    {
+        return baseOrderType;
+    }
+    
+    // For BUY orders
+    if(signal.direction == "BUY")
+    {
+        if(signal.orderType == "LIMIT")
+        {
+            // BUY LIMIT: entry price should be below current price
+            if(signal.entryPrice < currentPrice)
+                return ORDER_TYPE_BUY_LIMIT;
+            else
+                return ORDER_TYPE_BUY;  // Convert to market if price already reached
+        }
+        else if(signal.orderType == "STOP")
+        {
+            // BUY STOP: entry price should be above current price
+            if(signal.entryPrice > currentPrice)
+                return ORDER_TYPE_BUY_STOP;
+            else
+                return ORDER_TYPE_BUY;  // Convert to market if price already reached
+        }
+    }
+    // For SELL orders
+    else if(signal.direction == "SELL")
+    {
+        if(signal.orderType == "LIMIT")
+        {
+            // SELL LIMIT: entry price should be above current price
+            if(signal.entryPrice > currentPrice)
+                return ORDER_TYPE_SELL_LIMIT;
+            else
+                return ORDER_TYPE_SELL;  // Convert to market if price already reached
+        }
+        else if(signal.orderType == "STOP")
+        {
+            // SELL STOP: entry price should be below current price
+            if(signal.entryPrice < currentPrice)
+                return ORDER_TYPE_SELL_STOP;
+            else
+                return ORDER_TYPE_SELL;  // Convert to market if price already reached
+        }
+    }
+    
+    // Default to base order type
+    return baseOrderType;
+}
+void AddToPendingOrdersArray(ulong ticket, string symbol, ENUM_ORDER_TYPE orderType, 
+                             double lots, double price, double sl, double tp, TelegramSignal &signal)
+{
+    ArrayResize(pendingOrders, pendingOrdersCount + 1);
+    
+    pendingOrders[pendingOrdersCount].ticket = ticket;
+    pendingOrders[pendingOrdersCount].symbol = symbol;
+    pendingOrders[pendingOrdersCount].orderType = orderType;
+    pendingOrders[pendingOrdersCount].lotSize = lots;
+    pendingOrders[pendingOrdersCount].price = price;
+    pendingOrders[pendingOrdersCount].stopLoss = sl;
+    pendingOrders[pendingOrdersCount].takeProfit = tp;
+    pendingOrders[pendingOrdersCount].createTime = TimeCurrent();
+    pendingOrders[pendingOrdersCount].originalSymbol = signal.originalSymbol;
+    pendingOrders[pendingOrdersCount].channelId = StringToInteger(signal.channelId);
+    
+    if(PendingOrderExpirationHours > 0)
+        pendingOrders[pendingOrdersCount].expireTime = TimeCurrent() + PendingOrderExpirationHours * 3600;
+    else
+        pendingOrders[pendingOrdersCount].expireTime = 0;
+    
+    pendingOrdersCount++;
+    
+    if(PrintToExpertLog)
+        Print("📋 Pending order added to tracking. Total pending: ", pendingOrdersCount);
+}
+void CheckAndDeleteOppositePendingOrders(TelegramSignal &signal)
+{
+    for(int i = pendingOrdersCount - 1; i >= 0; i--)
+    {
+        // Check if same symbol and opposite direction
+        if(pendingOrders[i].symbol == signal.finalSymbol)
+        {
+            bool isOpposite = false;
+            
+            if(signal.direction == "BUY" && 
+               (pendingOrders[i].orderType == ORDER_TYPE_SELL_LIMIT || 
+                pendingOrders[i].orderType == ORDER_TYPE_SELL_STOP))
+            {
+                isOpposite = true;
+            }
+            else if(signal.direction == "SELL" && 
+                    (pendingOrders[i].orderType == ORDER_TYPE_BUY_LIMIT || 
+                     pendingOrders[i].orderType == ORDER_TYPE_BUY_STOP))
+            {
+                isOpposite = true;
+            }
+            
+            if(isOpposite)
+            {
+                if(trade.OrderDelete(pendingOrders[i].ticket))
+                {
+                    if(PrintToExpertLog)
+                        Print("🗑️ Deleted opposite pending order #", pendingOrders[i].ticket);
+                    
+                    // Remove from array
+                    for(int j = i; j < pendingOrdersCount - 1; j++)
+                    {
+                        pendingOrders[j] = pendingOrders[j + 1];
+                    }
+                    pendingOrdersCount--;
+                    ArrayResize(pendingOrders, pendingOrdersCount);
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot sizes based on risk mode - MT5 VERSION            |
+//+------------------------------------------------------------------+
+void CalculateLotSizes(TelegramSignal &signal, double &lots[])
+{
+   double totalLots = 0;
+   
+   switch(RiskMode)
+   {
+      case RISK_FIXED_LOT:
+         totalLots = FixedLotSize;
+         break;
+         
+      case RISK_MONEY_AMOUNT:
+         totalLots = CalculateLotsFromRiskAmount(signal, RiskAmount);
+         break;
+         
+      case RISK_PERCENT_BALANCE:
+         {
+            double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+            double riskMoney = balance * (RiskPercent / 100.0);
+            totalLots = CalculateLotsFromRiskAmount(signal, riskMoney);
+         }
+         break;
+   }
+   
+   // Get MT5 symbol info for lot normalization
+   if(!symbolInfo.Name(signal.finalSymbol))
+   {
+      Print("❌ MT5 Cannot get symbol info for lot calculation: ", signal.finalSymbol);
+      lots[0] = FixedLotSize;
+      lots[1] = 0;
+      lots[2] = 0;
+      return;
+   }
+   
+   // Normalize lot size to MT5 broker requirements
+   double minLot = symbolInfo.LotsMin();
+   double maxLot = symbolInfo.LotsMax();
+   double lotStep = symbolInfo.LotsStep();
+   
+   totalLots = MathMax(totalLots, minLot);
+   totalLots = MathMin(totalLots, maxLot);
+   totalLots = NormalizeDouble(MathRound(totalLots / lotStep) * lotStep, 2);
+   
+   // Distribute lots among TPs
+   if(SplitRiskEqually)
+   {
+      int tpCount = 1;
+      if(signal.takeProfit2 > 0) tpCount++;
+      if(signal.takeProfit3 > 0) tpCount++;
+      
+      double lotPerTP = totalLots / tpCount;
+      lotPerTP = NormalizeDouble(MathRound(lotPerTP / lotStep) * lotStep, 2);
+      
+      for(int i = 0; i < 3; i++)
+      {
+         lots[i] = (i < tpCount) ? lotPerTP : 0;
+      }
+   }
+   else
+   {
+      // All lots on TP1
+      lots[0] = totalLots;
+      lots[1] = 0;
+      lots[2] = 0;
+   }
+   
+   if(PrintToExpertLog)
+   {
+      Print("💰 MT5 Risk calculation (", EnumToString(RiskMode), "):");
+      Print("   • Total calculated lots: ", DoubleToString(totalLots, 2));
+      Print("   • Min lot: ", DoubleToString(minLot, 2), " | Max lot: ", DoubleToString(maxLot, 2));
+      Print("   • Lot step: ", DoubleToString(lotStep, 2));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lots from risk amount - MT5 VERSION                   |
+//+------------------------------------------------------------------+
+double CalculateLotsFromRiskAmount(TelegramSignal &signal, double riskAmount)
+{
+   if(signal.stopLoss <= 0)
+   {
+      if(PrintToExpertLog)
+         Print("⚠️ MT5 No SL provided, using fixed lot size as fallback");
+      return FixedLotSize;
+   }
+   
+   // Get MT5 symbol information
+   if(!symbolInfo.Name(signal.finalSymbol))
+   {
+      Print("❌ MT5 Cannot get symbol info for risk calculation: ", signal.finalSymbol);
+      return FixedLotSize;
+   }
+   
+   symbolInfo.RefreshRates();
+   
+   double entryPrice = (signal.direction == "BUY") ? symbolInfo.Ask() : symbolInfo.Bid();
+   double slDistance = MathAbs(entryPrice - signal.stopLoss);
+   double tickValue = symbolInfo.TickValue();
+   double tickSize = symbolInfo.TickSize();
+   
+   if(tickValue <= 0 || tickSize <= 0)
+   {
+      Print("⚠️ MT5 Invalid tick data for ", signal.finalSymbol, ", using fixed lot");
+      return FixedLotSize;
+   }
+   
+   double riskPerLot = (slDistance / tickSize) * tickValue;
+   
+   if(riskPerLot <= 0)
+   {
+      Print("⚠️ MT5 Invalid risk calculation, using fixed lot");
+      return FixedLotSize;
+   }
+   
+   double calculatedLots = riskAmount / riskPerLot;
+   
+   if(PrintToExpertLog)
+   {
+      Print("📊 MT5 Risk calculation details:");
+      Print("   • Entry price: ", DoubleToString(entryPrice, symbolInfo.Digits()));
+      Print("   • SL distance: ", DoubleToString(slDistance, symbolInfo.Digits()));
+      Print("   • Risk per lot: $", DoubleToString(riskPerLot, 2));
+      Print("   • Target risk: $", DoubleToString(riskAmount, 2));
+      Print("   • Calculated lots: ", DoubleToString(calculatedLots, 2));
+   }
+   
+   return calculatedLots;
+}
+
+//+------------------------------------------------------------------+
+//| Execute single trade - MT5 VERSION                              |
+//+------------------------------------------------------------------+
+void ExecuteSingleTrade(TelegramSignal &signal, ENUM_ORDER_TYPE orderType, double lots, double sl, double tp, string tpLevel)
+{
+   string symbol = signal.finalSymbol;
+   string comment = CommentPrefix + "_" + signal.originalSymbol + "_" + tpLevel + "_islamahmed9717";
+   
+   // Setup MT5 symbol info
+   if(!symbolInfo.Name(symbol))
+   {
+      Print("❌ MT5 Cannot get symbol info for: ", symbol);
+      return;
+   }
+   
+   // Get current prices
+   symbolInfo.RefreshRates();
+   double currentBid = symbolInfo.Bid();
+   double currentAsk = symbolInfo.Ask();
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? currentAsk : currentBid;
+   
+   // Calculate price tolerance
+   double tolerancePoints = PriceTolerancePips * symbolInfo.Point();
+   double signalPrice = signal.entryPrice;
+   
+   // Check if signal has specific entry price
+   bool useMarketOrder = (signalPrice <= 0);
+   
+   if(!useMarketOrder && PriceTolerancePips > 0)
+   {
+      // Calculate price difference
+      double priceDiff = MathAbs(currentPrice - signalPrice);
+      double priceDiffPips = priceDiff / symbolInfo.Point();
+      
+      if(PrintToExpertLog)
+      {
+         Print("💹 MT5 Price Check:");
+         Print("   • Signal Price: ", DoubleToString(signalPrice, symbolInfo.Digits()));
+         Print("   • Current Price: ", DoubleToString(currentPrice, symbolInfo.Digits()));
+         Print("   • Difference: ", DoubleToString(priceDiffPips, 1), " pips");
+         Print("   • Tolerance: ", PriceTolerancePips, " pips");
+      }
+      
+      // Check if price moved beyond tolerance
+      if(priceDiff > tolerancePoints)
+      {
+         if(SkipSignalIfExceeded)
+         {
+            Print("⚠️ MT5 Price moved ", DoubleToString(priceDiffPips, 1), 
+                  " pips - exceeds tolerance (", PriceTolerancePips, " pips). Skipping signal.");
+            return;
+         }
+         else if(UseMarketPriceIfExceeded)
+         {
+            Print("💹 MT5 Price moved ", DoubleToString(priceDiffPips, 1), 
+                  " pips - using market price instead of signal price");
+            useMarketOrder = true;
+         }
+      }
+      else
+      {
+         // Price within tolerance - check if it's still valid for the direction
+         if(orderType == ORDER_TYPE_BUY)
+         {
+            // For BUY: current price should not be too far above signal price
+            if(currentPrice > signalPrice + tolerancePoints)
+            {
+               if(SkipSignalIfExceeded)
+               {
+                  Print("⚠️ MT5 BUY price too high. Signal: ", DoubleToString(signalPrice, symbolInfo.Digits()),
+                        " Current: ", DoubleToString(currentPrice, symbolInfo.Digits()));
+                  return;
+               }
+               useMarketOrder = true;
+            }
+         }
+         else // SELL
+         {
+            // For SELL: current price should not be too far below signal price
+            if(currentPrice < signalPrice - tolerancePoints)
+            {
+               if(SkipSignalIfExceeded)
+               {
+                  Print("⚠️ MT5 SELL price too low. Signal: ", DoubleToString(signalPrice, symbolInfo.Digits()),
+                        " Current: ", DoubleToString(currentPrice, symbolInfo.Digits()));
+                  return;
+               }
+               useMarketOrder = true;
+            }
+         }
+      }
+   }
+   
+   // Determine final execution price
+   double executionPrice = useMarketOrder ? currentPrice : signalPrice;
+   
+   // Adjust SL/TP based on actual execution price if needed
+   double adjustedSL = sl;
+   double adjustedTP = tp;
+   
+   if(!useMarketOrder && signalPrice > 0 && MathAbs(executionPrice - signalPrice) > symbolInfo.Point())
+   {
+      // Adjust SL/TP proportionally if price changed
+      double priceShift = executionPrice - signalPrice;
+      
+      if(sl > 0)
+         adjustedSL = sl + priceShift;
+      if(tp > 0)
+         adjustedTP = tp + priceShift;
+      
+      if(PrintToExpertLog)
+      {
+         Print("📊 MT5 Adjusted levels due to price shift:");
+         Print("   • SL: ", DoubleToString(sl, symbolInfo.Digits()), " → ", 
+               DoubleToString(adjustedSL, symbolInfo.Digits()));
+         Print("   • TP: ", DoubleToString(tp, symbolInfo.Digits()), " → ", 
+               DoubleToString(adjustedTP, symbolInfo.Digits()));
+      }
+   }
+   
+   // Normalize prices for MT5
+   double normalizedSL = (adjustedSL > 0) ? symbolInfo.NormalizePrice(adjustedSL) : 0;
+   double normalizedTP = (adjustedTP > 0) ? symbolInfo.NormalizePrice(adjustedTP) : 0;
+   
+   // Validate final stop levels
+   if(!ValidateFinalStopLevels(symbol, orderType, executionPrice, normalizedSL, normalizedTP))
+   {
+      Print("❌ MT5 Invalid stop levels after adjustment. Skipping trade.");
+      return;
+   }
+   
+   // Adjust lot size to MT5 symbol requirements
+   double lotStep = symbolInfo.LotsStep();
+   double normalizedLots = (lotStep > 0) ? NormalizeDouble(MathRound(lots / lotStep) * lotStep, 2) : lots;
+   
+   int signalAgeMinutes = (int)((TimeCurrent() - signal.signalTime) / 60);
+   
+   if(PrintToExpertLog)
+   {
+      Print("🎯 MT5 Executing ", EnumToString(orderType), " order:");
+      Print("   • Symbol: ", symbol, " (", signal.originalSymbol, ")");
+      Print("   • Lots: ", DoubleToString(normalizedLots, 2));
+      Print("   • Execution Price: ", DoubleToString(executionPrice, symbolInfo.Digits()),
+            useMarketOrder ? " (MARKET)" : " (LIMIT)");
+      Print("   • SL: ", DoubleToString(normalizedSL, symbolInfo.Digits()));
+      Print("   • TP: ", DoubleToString(normalizedTP, symbolInfo.Digits()));
+      Print("   • Signal Age: ", IntegerToString(signalAgeMinutes), " minutes");
+      Print("   • Comment: ", comment);
+   }
+   
+   // Execute the MT5 trade
+   bool result = false;
+   int attempts = 0;
+   
+   while(!result && attempts < MaxRetriesOrderSend)
+   {
+      attempts++;
+      
+      if(PrintToExpertLog && attempts > 1)
+         Print("🔄 MT5 Retry attempt #", attempts, " for ", symbol);
+      
+      // Set maximum deviation for market orders
+      trade.SetDeviationInPoints((ulong)(PriceTolerancePips * 10));
+      
+      // Use MT5 trade functions
+      if(useMarketOrder)
+      {
+         // Market order
+         if(orderType == ORDER_TYPE_BUY)
+            result = trade.Buy(normalizedLots, symbol, 0, normalizedSL, normalizedTP, comment);
+         else
+            result = trade.Sell(normalizedLots, symbol, 0, normalizedSL, normalizedTP, comment);
+      }
+      else
+      {
+         // Limit order at specific price
+         if(orderType == ORDER_TYPE_BUY)
+         {
+            if(executionPrice <= currentAsk)
+               result = trade.Buy(normalizedLots, symbol, executionPrice, normalizedSL, normalizedTP, comment);
+            else
+               result = trade.BuyLimit(normalizedLots, executionPrice, symbol, normalizedSL, normalizedTP, 0, 0, comment);
+         }
+         else
+         {
+            if(executionPrice >= currentBid)
+               result = trade.Sell(normalizedLots, symbol, executionPrice, normalizedSL, normalizedTP, comment);
+            else
+               result = trade.SellLimit(normalizedLots, executionPrice, symbol, normalizedSL, normalizedTP, 0, 0, comment);
+         }
+      }
+      
+      if(!result)
+      {
+         uint errorCode = trade.ResultRetcode();
+         string errorDesc = trade.ResultRetcodeDescription();
+         Print("❌ MT5 Trade failed (attempt ", attempts, "/", MaxRetriesOrderSend, "): ", errorDesc, " (", errorCode, ")");
+         
+         if(errorCode == TRADE_RETCODE_REQUOTE || errorCode == TRADE_RETCODE_PRICE_CHANGED)
+         {
+            Sleep(500);
+            symbolInfo.RefreshRates();
+            currentPrice = (orderType == ORDER_TYPE_BUY) ? symbolInfo.Ask() : symbolInfo.Bid();
+         }
+         else if(errorCode == TRADE_RETCODE_NO_MONEY)
+         {
+            Print("💰 MT5 Insufficient funds for trade. Required margin: ", 
+                  SymbolInfoDouble(symbol, SYMBOL_MARGIN_INITIAL) * normalizedLots);
+            break;
+         }
+         else if(errorCode == TRADE_RETCODE_MARKET_CLOSED)
+         {
+            Print("🕒 MT5 Market is closed for ", symbol);
+            break;
+         }
+         else
+         {
+            Sleep(1000);
+         }
+      }
+   }
+   
+   if(result)
+   {
+      totalTradesExecuted++;
+      ulong ticket = trade.ResultOrder();
+      
+      // Add to MT5 tracking array
+      AddToTrackingArray(ticket, symbol, orderType, normalizedLots, executionPrice, normalizedSL, normalizedTP, signal.originalSymbol);
+      
+      // Generate success message
+      string directionStr = (orderType == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+      string priceInfo = useMarketOrder ? "MARKET" : DoubleToString(executionPrice, symbolInfo.Digits());
+      string message = StringFormat("✅ MT5 %s %s(%s) %.2f lots @ %s | %s | Age: %dmin | SL: %.5f | TP: %.5f | #%I64u | islamahmed9717", 
+                                   directionStr, signal.originalSymbol, symbol, normalizedLots, priceInfo, tpLevel, signalAgeMinutes, normalizedSL, normalizedTP, ticket);
+      
+      // Send notifications
+      if(SendMT5Alerts)
+         Alert(message);
+      
+      if(SendPushNotifications)
+         SendNotification(message);
+      
+      if(PrintToExpertLog)
+      {
+         Print("✅ MT5 TRADE EXECUTED SUCCESSFULLY!");
+         Print("   🎫 Ticket: #", ticket);
+         Print("   ⏰ Signal was ", IntegerToString(signalAgeMinutes), " minutes old");
+         Print("   💹 Price tolerance: ", PriceTolerancePips, " pips");
+         Print("   📊 ", message);
+         Print("   🎯 Total MT5 trades executed today: ", totalTradesExecuted);
+      }
+   }
+   else
+   {
+      Print("❌ MT5 TRADE EXECUTION FAILED after ", MaxRetriesOrderSend, " attempts");
+      Print("   📊 Signal: ", signal.originalSymbol, " → ", symbol, " ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"));
+      Print("   💰 Lots: ", DoubleToString(normalizedLots, 2));
+      Print("   ⏰ Signal Age: ", IntegerToString(signalAgeMinutes), " minutes");
+      
+      if(SendMT5Alerts)
+         Alert("❌ MT5 Failed to execute trade: " + symbol + " " + (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"));
+   }
+}
+
+bool ValidateFinalStopLevels(string symbol, ENUM_ORDER_TYPE orderType, double price, double sl, double tp)
+{
+   if(sl <= 0 || tp <= 0)
+      return true; // No stops to validate
+   
+   // Get minimum stop level
+   int stopLevel = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double minDistance = stopLevel * point;
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // For BUY: SL must be below price, TP must be above price
+      if(sl >= price)
+      {
+         Print("❌ Invalid BUY: SL (", DoubleToString(sl, _Digits), ") >= Price (", DoubleToString(price, _Digits), ")");
+         return false;
+      }
+      if(tp <= price)
+      {
+         Print("❌ Invalid BUY: TP (", DoubleToString(tp, _Digits), ") <= Price (", DoubleToString(price, _Digits), ")");
+         return false;
+      }
+      
+      // Check minimum distances
+      if(price - sl < minDistance)
+      {
+         Print("❌ BUY SL too close. Min distance: ", IntegerToString(stopLevel), " points");
+         return false;
+      }
+      if(tp - price < minDistance)
+      {
+         Print("❌ BUY TP too close. Min distance: ", IntegerToString(stopLevel), " points");
+         return false;
+      }
+   }
+   else // SELL
+   {
+      // For SELL: SL must be above price, TP must be below price
+      if(sl <= price)
+      {
+         Print("❌ Invalid SELL: SL (", DoubleToString(sl, _Digits), ") <= Price (", DoubleToString(price, _Digits), ")");
+         return false;
+      }
+      if(tp >= price)
+      {
+         Print("❌ Invalid SELL: TP (", DoubleToString(tp, _Digits), ") >= Price (", DoubleToString(price, _Digits), ")");
+         return false;
+      }
+      
+      // Check minimum distances
+      if(sl - price < minDistance)
+      {
+         Print("❌ SELL SL too close. Min distance: ", IntegerToString(stopLevel), " points");
+         return false;
+      }
+      if(price - tp < minDistance)
+      {
+         Print("❌ SELL TP too close. Min distance: ", IntegerToString(stopLevel), " points");
+         return false;
+      }
+   }
+   
+   return true;
+}
+//+------------------------------------------------------------------+
+//| Add trade to tracking array - MT5 VERSION                       |
+//+------------------------------------------------------------------+
+void AddToTrackingArray(ulong ticket, string symbol, ENUM_ORDER_TYPE orderType, double lots, double price, double sl, double tp, string originalSymbol)
+{
+   ArrayResize(openTrades, openTradesCount + 1);
+   
+   openTrades[openTradesCount].ticket = ticket;
+   openTrades[openTradesCount].symbol = symbol;
+   openTrades[openTradesCount].orderType = orderType;
+   openTrades[openTradesCount].lotSize = lots;
+   openTrades[openTradesCount].openPrice = price;
+   openTrades[openTradesCount].stopLoss = sl;
+   openTrades[openTradesCount].takeProfit = tp;
+   openTrades[openTradesCount].openTime = TimeCurrent();
+   openTrades[openTradesCount].slMovedToBreakeven = false;
+   openTrades[openTradesCount].lastTrailingLevel = 0;
+   openTrades[openTradesCount].originalSymbol = originalSymbol;
+   
+   openTradesCount++;
+   
+   if(PrintToExpertLog)
+      Print("📋 MT5 Trade added to tracking array. Total tracked: ", openTradesCount);
+}
+
+
+//+------------------------------------------------------------------+
+//| Process trailing stops - MT5 VERSION                            |
+//+------------------------------------------------------------------+
+void ProcessTrailingStops()
+{
+   for(int i = 0; i < openTradesCount; i++)
+   {
+      if(!positionInfo.SelectByTicket(openTrades[i].ticket))
+         continue;
+
+      string symbol = openTrades[i].symbol;
+      if(!symbolInfo.Name(symbol))
+         continue;
+
+      symbolInfo.RefreshRates();
+      double bid = symbolInfo.Bid();
+      double ask = symbolInfo.Ask();
+      double pip = PipSize(symbol);
+
+      double profitPips = (openTrades[i].orderType == ORDER_TYPE_BUY)
+                          ? (bid - openTrades[i].openPrice)  / pip
+                          : (openTrades[i].openPrice - ask) / pip;
+
+      if(profitPips < TrailingStartPips)             // trigger not reached
+         continue;
+
+      double newSL = (openTrades[i].orderType == ORDER_TYPE_BUY)
+                     ? bid - TrailingStepPips * pip
+                     : ask + TrailingStepPips * pip;
+
+      newSL = NormalizeDouble(newSL,
+               (int)SymbolInfoInteger(symbol,SYMBOL_DIGITS));
+
+      // move SL only if it improves by ≥ TrailingStepPips
+      double curSL  = positionInfo.StopLoss();
+      bool   better =
+        (openTrades[i].orderType == ORDER_TYPE_BUY  && (curSL==0 || newSL > curSL + TrailingStepPips*pip)) ||
+        (openTrades[i].orderType == ORDER_TYPE_SELL && (curSL==0 || newSL < curSL - TrailingStepPips*pip));
+
+      if(better && trade.PositionModify(openTrades[i].ticket,newSL,
+                                        openTrades[i].takeProfit))
+      {
+         openTrades[i].stopLoss = newSL;
+
+         if(PrintToExpertLog)
+            Print("📈 Trailing SL -> ",
+                  DoubleToString(newSL,symbolInfo.Digits()),
+                  "  (ticket ",openTrades[i].ticket,")");
+      }
+   }
+}
+//+------------------------------------------------------------------+
+//| Calculate trailing stop loss - MT5 VERSION                      |
+//+------------------------------------------------------------------+
+double CalculateTrailingSL(TradeInfo &tradeInfo, double currentPrice)
+{
+   string symbol = tradeInfo.symbol;
+   double pip    = PipSize(symbol);
+
+   double newSL  = (tradeInfo.orderType == ORDER_TYPE_BUY)
+                   ? currentPrice - TrailingStepPips * pip
+                   : currentPrice + TrailingStepPips * pip;
+
+   return NormalizeDouble(newSL,
+                          (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+}
+//+------------------------------------------------------------------+
+//| Process breakeven management - FIXED MT5 VERSION                |
+//+------------------------------------------------------------------+
+void ProcessBreakeven()
+{
+   for(int i = 0; i < openTradesCount; i++)
+   {
+      if(openTrades[i].slMovedToBreakeven)
+         continue;
+
+      if(!positionInfo.SelectByTicket(openTrades[i].ticket))
+         continue;
+
+      string symbol = openTrades[i].symbol;
+      if(!symbolInfo.Name(symbol))
+         continue;
+
+      symbolInfo.RefreshRates();
+      double bid = symbolInfo.Bid();
+      double ask = symbolInfo.Ask();
+      double pip = PipSize(symbol);
+
+      double profitPips = (openTrades[i].orderType == ORDER_TYPE_BUY)
+                          ? (bid - openTrades[i].openPrice)  / pip
+                          : (openTrades[i].openPrice - ask) / pip;
+
+      if(profitPips < BreakevenAfterPips)             // not reached yet
+         continue;
+
+      double newSL = (openTrades[i].orderType == ORDER_TYPE_BUY)
+                     ? openTrades[i].openPrice + BreakevenPlusPips * pip
+                     : openTrades[i].openPrice - BreakevenPlusPips * pip;
+
+      newSL = NormalizeDouble(newSL,
+               (int)SymbolInfoInteger(symbol,SYMBOL_DIGITS));
+
+      if(trade.PositionModify(openTrades[i].ticket,newSL,
+                              openTrades[i].takeProfit))
+      {
+         openTrades[i].stopLoss           = newSL;
+         openTrades[i].slMovedToBreakeven = true;
+
+         if(PrintToExpertLog)
+            Print("⚖️ Breakeven SL -> ",
+                  DoubleToString(newSL,symbolInfo.Digits()),
+                  "  (ticket ",openTrades[i].ticket,")");
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Clean up closed trades from tracking - MT5 VERSION              |
+//+------------------------------------------------------------------+
+void CleanupClosedPositions()
+{
+   for(int i = openTradesCount - 1; i >= 0; i--)
+   {
+      if(!positionInfo.SelectByTicket(openTrades[i].ticket))
+      {
+         // Position is closed, remove from tracking
+         if(PrintToExpertLog)
+         {
+            Print("📊 MT5 Position closed: Ticket #", openTrades[i].ticket, " (", openTrades[i].originalSymbol, ")");
+         }
+         
+         // Remove from array
+         for(int j = i; j < openTradesCount - 1; j++)
+         {
+            openTrades[j] = openTrades[j + 1];
+         }
+         openTradesCount--;
+         ArrayResize(openTrades, openTradesCount);
+      }
+   }
+}
+
+void DisplayTrailingStatus()
+{
+    if(!PrintToExpertLog || openTradesCount == 0)
+        return;
+        
+    Print("═══════════════════════════════════════════════");
+    Print("📊 TRAILING STOP & BREAKEVEN STATUS:");
+    Print("═══════════════════════════════════════════════");
+    
+    for(int i = 0; i < openTradesCount; i++)
+    {
+        if(!positionInfo.SelectByTicket(openTrades[i].ticket))
+            continue;
+            
+        string symbol = openTrades[i].symbol;
+        if(!symbolInfo.Name(symbol))
+            continue;
+            
+        symbolInfo.RefreshRates();
+        
+        double currentPrice = (openTrades[i].orderType == ORDER_TYPE_BUY) ? symbolInfo.Bid() : symbolInfo.Ask();
+        double point = symbolInfo.Point();
+        
+        // Calculate profit in points
+        double profitPoints = 0;
+        if(openTrades[i].orderType == ORDER_TYPE_BUY)
+        {
+            profitPoints = (currentPrice - openTrades[i].openPrice) / point;
+        }
+        else
+        {
+            profitPoints = (openTrades[i].openPrice - currentPrice) / point;
+        }
+        
+        string status = "";
+        if(openTrades[i].slMovedToBreakeven)
+        {
+            status = "✅ Breakeven Active";
+        }
+        else if(profitPoints >= TrailingStartPips)
+        {
+            status = "📈 Trailing Active";
+        }
+        else if(profitPoints >= BreakevenAfterPips)
+        {
+            status = "⏳ Ready for Breakeven";
+        }
+        else
+        {
+            status = "⏸️ Waiting (" + DoubleToString(profitPoints, 1) + " pips)";
+        }
+        
+        Print("• Ticket #", openTrades[i].ticket, " (", openTrades[i].originalSymbol, "): ", status);
+    }
+    
+    Print("═══════════════════════════════════════════════");
+}
+//+------------------------------------------------------------------+
+//| Check if it's time to trade                                     |
+//+------------------------------------------------------------------+
+bool IsTimeToTrade()
+{
+   // Check day of week
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int dayOfWeek = dt.day_of_week;
+   
+   switch(dayOfWeek)
+   {
+      case 1: if(!TradeOnMonday) return false; break;
+      case 2: if(!TradeOnTuesday) return false; break;
+      case 3: if(!TradeOnWednesday) return false; break;
+      case 4: if(!TradeOnThursday) return false; break;
+      case 5: if(!TradeOnFriday) return false; break;
+      case 6: if(!TradeOnSaturday) return false; break;
+      case 0: if(!TradeOnSunday) return false; break;
+   }
+   
+   // Check time filter
+   if(UseTimeFilter)
+   {
+      string currentTime = TimeToString(TimeCurrent(), TIME_MINUTES);
+      if(currentTime < StartTime || currentTime > EndTime)
+         return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Update EA comment display - MT5 VERSION                         |
+//+------------------------------------------------------------------+
+void UpdateComment()
+{
+    string comment = "📱 TELEGRAM EA MANAGER - COMPLETE MT5 v3.00\n";
+    comment += "════════════════════════════════════════════\n";
+    comment += "👤 Developer: islamahmed9717\n";
+    comment += "📅 Version: 3.00 MT5 (LIMIT ORDERS SUPPORT)\n";
+    comment += "🔗 GitHub: https://github.com/islamahmed9717\n";
+    comment += "🎯 Platform: MetaTrader 5\n";
+    comment += "⏰ Signal Expiry: " + IntegerToString(MaxSignalAgeMinutes) + " minutes\n";
+    comment += "📁 Signal File: telegram_signals.txt\n";
+    comment += "📊 Order Types: " + (ForceMarketExecution ? "MARKET ONLY" : "MARKET/LIMIT/STOP") + "\n";
+    comment += "════════════════════════════════════════════\n";
+    comment += "📊 REAL-TIME STATISTICS:\n";
+    comment += "• Signals Processed: " + IntegerToString(totalSignalsProcessed) + "\n";
+    comment += "• Trades Executed: " + IntegerToString(totalTradesExecuted) + "\n";
+    comment += "• Pending Orders: " + IntegerToString(pendingOrdersCount) + "\n";
+    comment += "• Expired Signals: " + IntegerToString(totalExpiredSignals) + " ⏰\n";
+    comment += "• Symbols Filtered: " + IntegerToString(totalSymbolsFiltered) + "\n";
+    comment += "• Open Positions: " + IntegerToString(openTradesCount) + "\n";
+    comment += "• Processed IDs: " + IntegerToString(processedSignalCount) + "\n";
+    comment += "• Magic Number: " + IntegerToString(magicNumber) + "\n";
+    comment += "• Server Time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + "\n";
+    comment += "════════════════════════════════════════════\n";
+    
+    // Show pending orders if any
+    if(pendingOrdersCount > 0)
+    {
+        comment += "⏳ PENDING ORDERS:\n";
+        for(int i = 0; i < MathMin(3, pendingOrdersCount); i++)
+        {
+            comment += "• " + GetOrderTypeName(pendingOrders[i].orderType) + " " + 
+                      pendingOrders[i].originalSymbol + " @ " + 
+                      DoubleToString(pendingOrders[i].price, _Digits) + "\n";
+        }
+        if(pendingOrdersCount > 3)
+            comment += "• ... and " + IntegerToString(pendingOrdersCount - 3) + " more\n";
+        comment += "════════════════════════════════════════════\n";
+    }
+    
+    // Status
+    string systemStatus = "WAITING 🟡";
+    if(totalSignalsProcessed > 0 && totalTradesExecuted > 0)
+        systemStatus = "ACTIVE & TRADING ✅";
+    else if(totalSignalsProcessed > 0)
+        systemStatus = "PROCESSING SIGNALS 🔄";
+    else if(totalExpiredSignals > 0)
+        systemStatus = "SIGNALS EXPIRED ⏰";
+    
+    comment += "🎯 MT5 SYSTEM STATUS: " + systemStatus + "\n";
+    comment += "📱 Keep Windows app running for signals!\n";
+    comment += "🕐 Current server time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\n";
+    comment += "👤 User: islamahmed9717\n";
+    
+    Comment(comment);
+}
+//+------------------------------------------------------------------+
+//| Performance Monitoring Function                                 |
+//+------------------------------------------------------------------+
+void LogPerformanceStats()
+{
+   static datetime lastLogTime = 0;
+   datetime currentTime = TimeCurrent();
+   
+   // Log stats every hour
+   if(currentTime - lastLogTime >= 3600)
+   {
+      lastLogTime = currentTime;
+      
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double profit = equity - balance;
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      
+      Print("📊 MT5 HOURLY PERFORMANCE REPORT:");
+      Print("   • Account Equity: $", DoubleToString(equity, 2));
+      Print("   • Account Balance: $", DoubleToString(balance, 2));
+      Print("   • Floating P&L: $", DoubleToString(profit, 2));
+      Print("   • Free Margin: $", DoubleToString(freeMargin, 2));
+      Print("   • Open Positions: ", openTradesCount);
+      Print("   • Signals Processed: ", totalSignalsProcessed);
+      Print("   • Trades Executed: ", totalTradesExecuted);
+      Print("   • Signal Success Rate: ", 
+            (totalSignalsProcessed > 0 ? DoubleToString((double)totalTradesExecuted/totalSignalsProcessed*100, 1) : "0"), "%");
+      Print("   • Current UTC: 2025-06-20 23:07:34");
+      Print("   • islamahmed9717 - Telegram EA MT5");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| MT5 Connection Health Check                                     |
+//+------------------------------------------------------------------+
+bool CheckMT5ConnectionHealth()
+{
+   // Check if connected to trade server
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
+   {
+      Print("❌ MT5 Not connected to trade server");
+      return false;
+   }
+   
+   // Check if trading is allowed
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   {
+      Print("❌ MT5 Trading not allowed in terminal");
+      return false;
+   }
+   
+   // Check if expert advisors are allowed
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+   {
+      Print("❌ MT5 Expert Advisors trading not allowed");
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Account Safety Check                                            |
+//+------------------------------------------------------------------+
+bool CheckAccountSafety()
+{
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+   
+   // Check equity vs balance ratio
+   if(equity > 0 && balance > 0)
+   {
+      double equityBalanceRatio = equity / balance;
+      
+      // If equity drops below 70% of balance, trigger warning
+      if(equityBalanceRatio < 0.7)
+      {
+         Print("⚠️ MT5 WARNING: Equity/Balance ratio low: ", DoubleToString(equityBalanceRatio * 100, 1), "%");
+         
+         if(SendMT5Alerts)
+            Alert("⚠️ MT5 WARNING: Low equity ratio " + DoubleToString(equityBalanceRatio * 100, 1) + "% | islamahmed9717");
+         
+         // If ratio drops below 50%, emergency stop
+         if(equityBalanceRatio < 0.5)
+         {
+            EmergencyStopEA("Critical equity loss - below 50% of balance");
+            return false;
+         }
+      }
+   }
+   
+   // Check margin level
+   if(marginLevel > 0 && marginLevel < 200) // Below 200% margin level
+   {
+      Print("⚠️ MT5 WARNING: Low margin level: ", DoubleToString(marginLevel, 1), "%");
+      
+      if(marginLevel < 100) // Critical margin level
+      {
+         EmergencyStopEA("Critical margin level - below 100%");
+         return false;
+      }
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Emergency Stop Function                                         |
+//+------------------------------------------------------------------+
+void EmergencyStopEA(string reason)
+{
+   Print("🚨 EMERGENCY STOP TRIGGERED: ", reason);
+   Print("⏹️ Stopping Telegram EA MT5 for safety...");
+   
+   // Stop timer
+   EventKillTimer();
+   
+   // Alert user
+   if(SendMT5Alerts)
+      Alert("🚨 EMERGENCY STOP: " + reason + " | Telegram EA MT5 | islamahmed9717");
+   
+   // Update comment
+   Comment("🚨 EMERGENCY STOP ACTIVE 🚨\n" +
+           "Reason: " + reason + "\n" +
+           "Time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + "\n" +
+           "Contact: islamahmed9717\n" +
+           "Platform: MetaTrader 5\n\n" +
+           "Please restart EA after resolving the issue.");
+   
+   Print("📱 Emergency stop completed. Please check the issue and restart EA.");
+   Print("👤 Developer: islamahmed9717 | MT5 Version 2.17");
+}
+
+//+------------------------------------------------------------------+
+//| Enhanced Signal Quality Check                                   |
+//+------------------------------------------------------------------+
+bool IsSignalQualityGood(TelegramSignal &signal)
+{
+   // Check signal completeness
+   double completenessScore = 0;
+   
+   if(StringLen(signal.originalSymbol) > 0) completenessScore += 20;
+   if(StringLen(signal.direction) > 0) completenessScore += 20;
+   if(signal.stopLoss > 0) completenessScore += 30;
+   if(signal.takeProfit1 > 0) completenessScore += 20;
+   if(signal.takeProfit2 > 0) completenessScore += 5;
+   if(signal.takeProfit3 > 0) completenessScore += 5;
+   
+   // Minimum quality threshold
+   if(completenessScore < 60)
+   {
+      if(PrintToExpertLog)
+         Print("⚠️ MT5 Signal quality too low: ", DoubleToString(completenessScore, 0), "% for ", signal.originalSymbol);
+      return false;
+   }
+   
+   // Check risk-reward ratio
+   if(signal.stopLoss > 0 && signal.takeProfit1 > 0)
+   {
+      double entryPrice = (signal.direction == "BUY") ? 
+                         (symbolInfo.Name(signal.finalSymbol) ? symbolInfo.Ask() : 1.0) : 
+                         (symbolInfo.Name(signal.finalSymbol) ? symbolInfo.Bid() : 1.0);
+      
+      double riskDistance = MathAbs(entryPrice - signal.stopLoss);
+      double rewardDistance = MathAbs(signal.takeProfit1 - entryPrice);
+      
+      if(riskDistance > 0)
+      {
+         double rrRatio = rewardDistance / riskDistance;
+         if(rrRatio < 0.5)
+         {
+            if(PrintToExpertLog)
+               Print("⚠️ MT5 Poor risk-reward ratio: ", DoubleToString(rrRatio, 2), " for ", signal.originalSymbol);
+            return false;
+         }
+      }
+   }
+   
+   if(PrintToExpertLog)
+      Print("✅ MT5 Signal quality check passed: ", DoubleToString(completenessScore, 0), "% for ", signal.originalSymbol);
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Final Enhanced Comment Function with Real-time Data            |
+//+------------------------------------------------------------------+
+void UpdateEnhancedComment()
+{
+   // Call performance monitoring
+   LogPerformanceStats();
+   
+   // Check connection and account safety
+   bool connectionOK = CheckMT5ConnectionHealth();
+   bool accountSafe = CheckAccountSafety();
+   
+   string comment = "📱 TELEGRAM EA MANAGER - ISLAMAHMED9717\n";
+   comment += "═══════════════════════════════════════════════\n";
+   comment += "👤 Developer: islamahmed9717\n";
+   comment += "📅 Version: 2.17 MT5 - FINAL CORRECTED\n";
+   comment += "🕐 UTC Time: 2025-06-20 23:07:34\n";
+   comment += "🔗 GitHub: github.com/islamahmed9717\n";
+   comment += "⏰ Signal Expiry: " + IntegerToString(MaxSignalAgeMinutes) + " minutes\n";
+   comment += "═══════════════════════════════════════════════\n";
+   
+   // System Health Status
+   comment += "🔧 SYSTEM HEALTH:\n";
+   comment += "• MT5 Connection: " + (connectionOK ? "✅ Connected" : "❌ Disconnected") + "\n";
+   comment += "• Account Safety: " + (accountSafe ? "✅ Safe" : "❌ Risk") + "\n";
+   comment += "• Trading Allowed: " + (MQLInfoInteger(MQL_TRADE_ALLOWED) ? "✅ Yes" : "❌ No") + "\n";
+   comment += "• Terminal Connected: " + (TerminalInfoInteger(TERMINAL_CONNECTED) ? "✅ Yes" : "❌ No") + "\n";
+   
+   // Account Information
+   comment += "═══════════════════════════════════════════════\n";
+   comment += "💰 ACCOUNT INFO:\n";
+   comment += "• Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n";
+   comment += "• Equity: $" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n";
+   comment += "• Free Margin: $" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + "\n";
+   comment += "• Margin Level: " + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_LEVEL), 1) + "%\n";
+   
+   // Signal Statistics
+   comment += "═══════════════════════════════════════════════\n";
+   comment += "📊 SIGNAL STATISTICS:\n";
+   comment += "• Processed: " + IntegerToString(totalSignalsProcessed) + "\n";
+   comment += "• Executed: " + IntegerToString(totalTradesExecuted) + "\n";
+   comment += "• Expired: " + IntegerToString(totalExpiredSignals) + " ⏰\n";
+   comment += "• Filtered: " + IntegerToString(totalSymbolsFiltered) + "\n";
+   comment += "• Success Rate: " + (totalSignalsProcessed > 0 ? 
+           DoubleToString((double)totalTradesExecuted/totalSignalsProcessed*100, 1) : "0") + "%\n";
+   
+   // Current Positions
+   comment += "═══════════════════════════════════════════════\n";
+   if(openTradesCount > 0)
+   {
+      comment += "📈 OPEN POSITIONS (" + IntegerToString(openTradesCount) + "):\n";
+      double totalProfit = 0;
+      
+      for(int i = 0; i < MathMin(openTradesCount, 3); i++)
+      {
+         if(positionInfo.SelectByTicket(openTrades[i].ticket))
+         {
+            double profit = positionInfo.Profit() + positionInfo.Swap() + positionInfo.Commission();
+            totalProfit += profit;
+            long ageMinutes = (TimeCurrent() - openTrades[i].openTime) / 60;
+            
+            comment += "• #" + IntegerToString(openTrades[i].ticket) + " " + 
+                      openTrades[i].originalSymbol + " " +
+                      DoubleToString(openTrades[i].lotSize, 2) + " lots\n";
+            comment += "  P&L: $" + DoubleToString(profit, 2) + 
+                      " | Age: " + IntegerToString((int)ageMinutes) + "min\n";
+         }
+      }
+      
+      if(openTradesCount > 3)
+         comment += "• ... and " + IntegerToString(openTradesCount - 3) + " more positions\n";
+      
+      comment += "• Total P&L: $" + DoubleToString(totalProfit, 2) + "\n";
+   }
+   else
+   {
+      comment += "💤 No open positions\n";
+   }
+   
+   // Status and Warnings
+   comment += "═══════════════════════════════════════════════\n";
+   string status = "🟡 WAITING";
+   if(!connectionOK || !accountSafe)
+      status = "🔴 CRITICAL";
+   else if(totalSignalsProcessed > 0 && totalTradesExecuted > 0)
+      status = "🟢 ACTIVE";
+   else if(totalExpiredSignals > 5)
+      status = "🟠 SIGNALS EXPIRED";
+   
+   comment += "🎯 STATUS: " + status + "\n";
+   comment += "⏰ Fresh signals only: " + IntegerToString(MaxSignalAgeMinutes) + "min max\n";
+   comment += "📱 Keep Windows app running!\n";
+   comment += "👤 islamahmed9717 - Telegram EA MT5\n";
+   
+   Comment(comment);
+}
+
+//+------------------------------------------------------------------+
+//| Final Signal Processing with Complete Validation               |
+//+------------------------------------------------------------------+
+bool ProcessSignalWithFullValidation(TelegramSignal &signal)
+{
+   // Step 1: Check signal quality
+   if(!IsSignalQualityGood(signal))
+   {
+      return false;
+   }
+   
+   // Step 2: Check account safety
+   if(!CheckAccountSafety())
+   {
+      return false;
+   }
+   
+   // All validations passed
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| END OF COMPLETE TELEGRAM EA MT5 CODE - VERSION 2.17           |
+//| FINAL RELEASE - ALL COMPILATION ISSUES FIXED                  |
+//| DEVELOPER: islamahmed9717                                      |
+//| UPDATED: 2025-06-20 23:07:34 UTC                              |
+//+------------------------------------------------------------------+
+double PipSize(const string symbol)
+{
+   double point  = SymbolInfoDouble(symbol ,SYMBOL_POINT);
+   int    digits = (int)   SymbolInfoInteger(symbol,SYMBOL_DIGITS);
+
+   // 5-digit, 3-digit, **2-digit** and **1-digit** quotes -> 10 points = 1 pip
+   if(digits == 5 || digits == 3 || digits == 2 || digits == 1)
+      return point * 10.0;
+
+   // everything else (4 / 0 digits …) one point already *is* one pip
+   return point;
+}
